@@ -1,4 +1,4 @@
-AppleMapDownloader
+# AppleMapDownloader
 
 AppleMapDownloader is a lightweight desktop application for downloading and stitching large map areas into high-resolution raster outputs. It supports multi-threaded downloading, automatic image stitching, GeoTIFF export, BigTIFF support, and georeferenced outputs suitable for GIS workflows.
 
