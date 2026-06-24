@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AppleMapDownloader - Apple Maps Satellite Downloader</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="AppleMapDownloader is a simple desktop tool for downloading Apple Maps satellite imagery at zoom level 18 and exporting stitched map areas for further GIS workflows.">
+
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --bg-2: #101010;
+      --panel: #141414;
+      --panel-2: #181818;
+      --text: #f2f2f2;
+      --muted: #a7a7a7;
+      --line: rgba(255,255,255,0.08);
+      --line-strong: rgba(255,255,255,0.14);
+      --blue: #1f8fff;
+      --cyan: #19cfe8;
+      --green: #79dc60;
+      --orange: #f28a34;
+      --shadow: 0 18px 52px rgba(0,0,0,0.34);
+      --radius: 8px;
+      --maxw: 1140px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(31,143,255,0.06), transparent 28rem),
+        radial-gradient(circle at bottom right, rgba(25,207,232,0.04), transparent 24rem),
+        linear-gradient(180deg, #090909 0%, #0d0d0d 100%);
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    .page {
+      width: min(var(--maxw), calc(100% - 28px));
+      margin: 0 auto;
+      padding: 26px 0 42px;
+    }
+
+    .frame {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: linear-gradient(180deg, #121212 0%, #0f0f0f 100%);
+      box-shadow: var(--shadow);
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,0.015);
+      color: var(--muted);
+      font-size: 0.88rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .topbar strong {
+      color: #ffffff;
+      font-weight: 850;
+    }
+
+    .topbar strong::before {
+      content: "";
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      margin-right: 10px;
+      border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.06);
+    }
+
+    .hero {
+      padding: 48px 42px 38px;
+      border-bottom: 1px solid var(--line);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.012), rgba(255,255,255,0)),
+        radial-gradient(circle at 80% 20%, rgba(31,143,255,0.08), transparent 22rem);
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1fr 0.9fr;
+      gap: 34px;
+      align-items: center;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 34px;
+      height: 1px;
+      background: linear-gradient(90deg, var(--blue), rgba(255,255,255,0.18));
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(3.2rem, 8vw, 6.5rem);
+      line-height: 0.9;
+      letter-spacing: -0.085em;
+      font-weight: 930;
+      color: #ffffff;
+    }
+
+    .subtitle {
+      max-width: 700px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: clamp(1.04rem, 2.2vw, 1.22rem);
+    }
+
+    .highlight-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 22px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.02);
+      color: #e8e8e8;
+      font-size: 0.87rem;
+      font-weight: 700;
+    }
+
+    .pill::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--blue);
+    }
+
+    .pill.green::before { background: var(--green); }
+    .pill.orange::before { background: var(--orange); }
+    .pill.cyan::before { background: var(--cyan); }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 28px;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 10px 16px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      background: #f3f3f3;
+      color: #111111;
+      font-size: 0.94rem;
+      font-weight: 820;
+      transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+    }
+
+    .button:hover {
+      transform: translateY(-1px);
+      border-color: rgba(31,143,255,0.55);
+    }
+
+    .button.secondary {
+      background: transparent;
+      color: #f2f2f2;
+    }
+
+    .button.secondary:hover { background: rgba(255,255,255,0.03); }
+
+    .hero-card {
+      padding: 22px;
+      border: 1px solid rgba(31,143,255,0.22);
+      border-radius: 12px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)),
+        #111111;
+    }
+
+    .map-icon {
+      width: 100%;
+      aspect-ratio: 1.55;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 10px;
+      background:
+        linear-gradient(135deg, rgba(31,143,255,0.18), transparent 28%),
+        linear-gradient(45deg, rgba(121,220,96,0.18), transparent 30%),
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.045) 0 1px, transparent 1px 42px),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 42px),
+        #0b0b0b;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .map-icon::after {
+      content: "ZOOM 18";
+      position: absolute;
+      right: 18px;
+      bottom: 16px;
+      padding: 6px 10px;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 999px;
+      background: rgba(0,0,0,0.45);
+      color: #ffffff;
+      font-size: 0.78rem;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+    }
+
+    .hero-card h2 {
+      margin: 18px 0 8px;
+      font-size: 1.25rem;
+      letter-spacing: -0.02em;
+    }
+
+    .hero-card p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .section {
+      padding: 34px 42px;
+      border-bottom: 1px solid var(--line);
+      background: transparent;
+    }
+
+    .section:nth-of-type(even) { background: rgba(255,255,255,0.01); }
+    .section:last-of-type { border-bottom: 0; }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: 0.56fr 1fr;
+      gap: 24px;
+      align-items: start;
+      margin-bottom: 20px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: clamp(1.42rem, 2.5vw, 2rem);
+      line-height: 1.08;
+      letter-spacing: -0.04em;
+      color: #ffffff;
+    }
+
+    h2::after {
+      content: "";
+      display: block;
+      width: 48px;
+      height: 2px;
+      margin-top: 12px;
+      background: linear-gradient(90deg, var(--blue), rgba(255,255,255,0.12));
+    }
+
+    .section-note {
+      margin: 0;
+      color: var(--muted);
+      font-weight: 560;
+    }
+
+    .section p { margin: 0; color: #d8d8d8; }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin: 24px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .feature-grid li {
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      color: #efefef;
+      font-weight: 680;
+    }
+
+    .feature-grid li::before {
+      content: "•";
+      margin-right: 10px;
+      color: var(--green);
+      font-weight: 900;
+    }
+
+    .feature-grid li:nth-child(3n)::before { color: var(--orange); }
+    .feature-grid li:nth-child(4n)::before { color: var(--cyan); }
+
+    .notice {
+      margin-top: 22px;
+      padding: 16px 18px;
+      border: 1px solid rgba(242,138,52,0.24);
+      border-left: 3px solid var(--orange);
+      border-radius: 0 var(--radius) var(--radius) 0;
+      background: rgba(242,138,52,0.045);
+      color: #eeeeee;
+      font-weight: 700;
+    }
+
+    .download-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 24px;
+    }
+
+    .download-card {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 164px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    .download-card:nth-child(1) { border-color: rgba(31,143,255,0.2); }
+    .download-card:nth-child(2) { border-color: rgba(25,207,232,0.18); }
+
+    .download-card h3 {
+      margin: 0 0 8px;
+      color: #ffffff;
+      font-size: 1.04rem;
+    }
+
+    .download-card p {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 0.96rem;
+    }
+
+    .download-card .button {
+      width: fit-content;
+      min-height: 40px;
+      padding: 9px 14px;
+      font-size: 0.92rem;
+    }
+
+    .code-block {
+      margin: 22px 0 0;
+      padding: 18px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #0b0b0b;
+      color: #f2f2f2;
+      font-size: 0.95rem;
+      line-height: 1.55;
+    }
+
+    code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+
+    footer {
+      padding: 24px 42px 28px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.94rem;
+      background: rgba(255,255,255,0.01);
+    }
+
+    @media (max-width: 900px) {
+      .hero-grid,
+      .section-head,
+      .download-grid,
+      .feature-grid { grid-template-columns: 1fr; }
+
+      .page {
+        width: min(100% - 18px, var(--maxw));
+        padding-top: 12px;
+      }
+
+      .hero,
+      .section,
+      footer {
+        padding-left: 22px;
+        padding-right: 22px;
+      }
+
+      .topbar {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+      }
+
+      .actions,
+      .button,
+      .download-card .button { width: 100%; }
+      .download-card { min-height: auto; }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="page">
+    <main class="frame">
+      <div class="topbar">
+        <strong>AppleMapDownloader</strong>
+        <span>Apple Maps · Satellite Download · Zoom 18 only</span>
+      </div>
+
+      <section class="hero">
+        <div class="hero-grid">
+          <div>
+            <div class="eyebrow">Apple Maps satellite downloader</div>
+            <h1>AppleMap<br>Downloader</h1>
+            <p class="subtitle">
+              A compact desktop downloader for Apple Maps satellite imagery. Select or enter an area, download Apple satellite frames, and export stitched map output for local workflows.
+            </p>
+
+            <div class="highlight-row">
+              <span class="pill">Apple Maps satellite</span>
+              <span class="pill orange">Zoom 18 only</span>
+              <span class="pill green">Windows onefile EXE</span>
+            </div>
+
+            <div class="actions" aria-label="Main links">
+              <a class="button" href="https://github.com/tarekwasfy01/AppleMapDowloader/releases/download/AppleMapDownloaderv.1.0/AppleMapDownloader.exe">
+                Download AppleMapDownloader.exe
+              </a>
+              <a class="button secondary" href="https://github.com/tarekwasfy01/AppleMapDowloader">
+                GitHub Repository
+              </a>
+              <a class="button secondary" href="https://github.com/tarekwasfy01/PyMapStitcher-3---Cuda-Maps-Downloader/releases">
+                PyMapStitcher Downloads
+              </a>
+            </div>
+          </div>
+
+          <div class="hero-card">
+            <div class="map-icon" aria-label="Abstract satellite map preview"></div>
+            <h2>Simple Apple satellite extraction</h2>
+            <p>
+              Built for quick Apple Maps satellite downloads. The downloader currently targets zoom level 18 only.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <h2>What it does</h2>
+          <p class="section-note">
+            AppleMapDownloader focuses on a narrow workflow: downloading Apple Maps satellite imagery for a selected geographic area.
+          </p>
+        </div>
+
+        <ul class="feature-grid">
+          <li>Downloads Apple Maps satellite imagery</li>
+          <li>Uses zoom level 18 only</li>
+          <li>Windows onefile executable available</li>
+          <li>Useful companion to PyMapStitcher</li>
+          <li>Designed for local desktop workflows</li>
+          <li>Suitable for high-resolution map collection experiments</li>
+        </ul>
+
+        <div class="notice">
+          Important: AppleMapDownloader currently works only with zoom 18. Other zoom levels are not supported in this release.
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <h2>Downloads</h2>
+          <p class="section-note">
+            Use the onefile EXE for the Apple downloader. For larger georeferenced map stitching workflows, use PyMapStitcher.
+          </p>
+        </div>
+
+        <div class="download-grid">
+          <article class="download-card">
+            <div>
+              <h3>AppleMapDownloader</h3>
+              <p>Standalone Windows onefile executable for Apple Maps satellite downloads.</p>
+            </div>
+            <a class="button" href="https://github.com/tarekwasfy01/AppleMapDowloader/releases/download/AppleMapDownloaderv.1.0/AppleMapDownloader.exe">
+              Download EXE
+            </a>
+          </article>
+
+          <article class="download-card">
+            <div>
+              <h3>PyMapStitcher</h3>
+              <p>Advanced CUDA maps downloader and stitcher with GeoTIFF / BigTIFF workflows.</p>
+            </div>
+            <a class="button secondary" href="https://github.com/tarekwasfy01/PyMapStitcher-3---Cuda-Maps-Downloader/releases">
+              Open PyMapStitcher Releases
+            </a>
+          </article>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <h2>Recommended workflow</h2>
+          <p class="section-note">
+            Use AppleMapDownloader when you specifically need Apple Maps satellite imagery. Use PyMapStitcher when you need broader map stitching, low-RAM exports, or GIS-oriented outputs.
+          </p>
+        </div>
+
+        <div class="code-block"><code>1. Download AppleMapDownloader.exe
+2. Select or enter your area
+3. Keep zoom set to 18
+4. Download Apple Maps satellite imagery
+5. Use PyMapStitcher for advanced stitching / GeoTIFF workflows when needed</code></div>
+      </section>
+
+      <footer>
+        AppleMapDownloader is a focused Apple Maps satellite downloader. PyMapStitcher is recommended for larger satellite stitching, GeoTIFF / BigTIFF export, and GIS-ready map workflows.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>
