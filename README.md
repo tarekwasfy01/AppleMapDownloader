@@ -28,6 +28,10 @@ Download the Linux installer:
 
 https://github.com/tarekwasfy01/AppleMapDownloader/releases/download/AppleMapDownloaderv.1.0/AppleMapDownloader_Setup_OneDir.exe
 
+<a href="https://snapcraft.io/applemapdownloader">
+    <img alt="Get it from the Snap Store" src=https://snapcraft.io/en/dark/install.svg />
+  </a>
+
 Download the MacOs installer:
 
 https://github.com/tarekwasfy01/AppleMapDownloader/releases/download/AppleMapDownloaderv.1.0/AppleMapDownloader-1.0.5.pkg
