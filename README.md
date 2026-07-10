@@ -1,7 +1,6 @@
 # AppleMapDownloader
-## At the moment you can only download with zoom 18!
-AppleMapDownloader is a lightweight desktop application for downloading and stitching large map areas into high-resolution raster outputs. It supports multi-threaded downloading, automatic image stitching, GeoTIFF export, BigTIFF support, and georeferenced outputs suitable for GIS workflows.
 
+AppleMapDownloader is a lightweight desktop application for downloading and stitching large map areas into high-resolution raster outputs. It supports multi-threaded downloading, automatic image stitching, GeoTIFF export, BigTIFF support, and georeferenced outputs suitable for GIS workflows.
 The project was developed as a companion utility for PyMapStitcher, allowing users to generate large map mosaics and geospatial imagery for research, GIS, remote sensing, archaeology, and mapping projects.
 
 Features
@@ -13,16 +12,9 @@ Preview and map selection tools
 Standalone Windows executable available
 Python source code available
 Suitable for very large raster generation workflows
-Download
-Windows OneFile Executable
+# Download
+https://github.com/tarekwasfy01/AppleMapDownloader/releases/download/AppleMapDownloaderv2.0/AppleMapDownloader.exe
 
-Download the latest standalone Windows executable:
-
-https://github.com/tarekwasfy01/AppleMapDowloader/releases/download/AppleMapDownloaderv.1.0/AppleMapDownloader.exe
-
-Download the latest Setup here:
-
-https://github.com/tarekwasfy01/AppleMapDowloader/releases/download/AppleMapDownloaderv.1.0/AppleMapDownloader-Setup-1.0.0.exe
 
 Download the Linux installer:
 
@@ -32,9 +24,6 @@ https://github.com/tarekwasfy01/AppleMapDownloader/releases/download/AppleMapDow
     <img alt="Get it from the Snap Store" src=https://snapcraft.io/en/dark/install.svg />
   </a>
 
-Download the MacOs installer:
-
-https://github.com/tarekwasfy01/AppleMapDownloader/releases/download/AppleMapDownloaderv.1.0/AppleMapDownloader-1.0.5.pkg
 
 Related Project: PyMapStitcher
 
