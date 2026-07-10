@@ -39,13 +39,22 @@ except Exception:  # pragma: no cover
     Image = None
 
 TILE_SIZE = 256
-FIXED_FRAME_SHIFT_X_PX = 260.0
-FIXED_FRAME_SHIFT_Y_PX = 330.0
+APPLE_LEFT_BAR_CROP_PX = 300
+# Apple Frame keeps a fixed left control pane before the real map canvas.
+# z13 seam checks show a remaining about-1px overlap with 284px, so use the
+# slightly narrower measured map pane.
+APPLE_MAP_PANE_LEFT_PX = 285.0
+FIXED_FRAME_SHIFT_X_PX = 0.0
+FIXED_FRAME_SHIFT_Y_PX = 0.0
+APPLE_FRAME_MAX_EFFECTIVE_ZOOM = 19
 USER_AGENT = "PyMapStitcher/1.0 (+local user tool)"
 MAX_INFLIGHT_PER_WORKER = 4  # prevents millions of Futures in RAM
 HARD_TILE_WARNING = 5_000_000
 DEFAULT_CHUNK_SIZE = 64
 MAX_DIRECT_TIFF_BYTES = 1_000_000_000_000  # 1 TB safety limit for sparse BigTIFF output
+MAX_FRAME_SCREENSHOT_CELLS = 50_000
+MAX_FRAME_SCREENSHOT_BYTES = 250_000_000_000
+APPLE_SELECTOR_MIN_ZOOM = 8
 
 MAP_PRESETS = {
     "Custom": {
@@ -675,6 +684,10 @@ def is_frame_template(url_template: str) -> bool:
     return any(m in url_template for m in markers)
 
 
+def is_apple_frame_template(url_template: str) -> bool:
+    return "maps.apple.com" in (url_template or "").lower()
+
+
 
 def project_tiles_dir(output_file: Path) -> Path:
     return output_file.parent / f"{output_file.stem}_tiles"
@@ -824,13 +837,21 @@ def expand_frame_url_grid(
     crop_center_shift_y_px = (float(crop_bottom) - float(crop_top)) / 2.0
 
     if bool(crop_correct_url):
-        # Crop-aware Apple/frame mode: request the full WebView geometry around
-        # the corrected center, so after cropping L/T/R/B the remaining image is
-        # exactly the intended visible grid cell.
-        request_center_x_px = visible_center_x_px + crop_center_shift_x_px
-        request_center_y_px = visible_center_y_px + crop_center_shift_y_px
-        request_w_px = float(visible_w_px) + float(crop_left) + float(crop_right)
-        request_h_px = float(visible_h_px) + float(crop_top) + float(crop_bottom)
+        # Apple/frame mode: the geographic map is not rendered across the full
+        # WebView. It starts after the left Apple side pane. The measured z18/z20
+        # outputs show an effective map pane of about 1316 px in a 1600 px
+        # renderer, i.e. map-left ~= 284 px. Compute the URL center from the
+        # center of the saved crop inside that real map pane.
+        map_left_px = max(0.0, min(float(render_w - 1), float(APPLE_MAP_PANE_LEFT_PX)))
+        map_span_px = max(1.0, min(float(render_w) - map_left_px, float(render_h)))
+        crop_center_x_px = (float(crop_left) + (float(render_w) - float(crop_right))) / 2.0
+        crop_center_y_px = (float(crop_top) + (float(render_h) - float(crop_bottom))) / 2.0
+        map_center_x_px = map_left_px + (map_span_px / 2.0)
+        map_center_y_px = float(render_h) / 2.0
+        request_center_x_px = visible_center_x_px - (crop_center_x_px - map_center_x_px)
+        request_center_y_px = visible_center_y_px - (crop_center_y_px - map_center_y_px)
+        request_w_px = map_span_px
+        request_h_px = map_span_px
         request_left_px = request_center_x_px - (request_w_px / 2.0)
         request_top_px = request_center_y_px - (request_h_px / 2.0)
         request_right_px = request_center_x_px + (request_w_px / 2.0)
@@ -1540,6 +1561,7 @@ try:
         QMessageBox, QPushButton, QProgressBar, QRubberBand, QSpinBox, QSplitter, QTextEdit,
         QVBoxLayout, QWidget
     )
+    from PySide6.QtGui import QIcon
     from PySide6.QtWebChannel import QWebChannel
     from PySide6.QtWebEngineWidgets import QWebEngineView
     from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings
@@ -1555,6 +1577,7 @@ except Exception as _pyside_exc:  # pragma: no cover
     QWebEngineView = None  # type: ignore
     QWebChannel = None  # type: ignore
     QRubberBand = None  # type: ignore
+    QIcon = None  # type: ignore
     QWebEngineProfile = None  # type: ignore
     QWebEngineSettings = None  # type: ignore
 
@@ -1588,6 +1611,92 @@ else:
 
 ESRI_WORLD_IMAGERY = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 GOOGLE_HYBRID_SELECTOR = "https://mt.google.com/vt/lyrs=y&x={x}&y={y}&z={z}&hl=de"
+APP_NAME = "Frame Map Downloader"
+APP_USER_MODEL_ID = "FrameMapDownloader.App"
+
+
+def strike_text(text: str) -> str:
+    return "".join((ch + chr(0x0336)) if ch != " " else ch for ch in text)
+
+
+APP_DISPLAY_TITLE = f"{strike_text('Apple')} Frame Map Downloader"
+APPLE_START_CENTER_LAT = 25.892909
+APPLE_START_CENTER_LON = 13.962352
+APPLE_START_LAT_SPAN = 119.310073
+APPLE_START_LON_SPAN = 287.402344
+APP_ICON_NAMES = (
+    "app_icon.ico",
+    "app_icon.png",
+    "AppleMapDownloader.ico",
+    "AppleMapDownloader.png",
+    "AppleMapDownloader_256x256.png",
+)
+
+
+def apple_start_bbox(lon: float = APPLE_START_CENTER_LON, lat: float = APPLE_START_CENTER_LAT) -> Tuple[float, float, float, float]:
+    south = float(clamp_lat(float(lat) - (APPLE_START_LAT_SPAN / 2.0)))
+    north = float(clamp_lat(float(lat) + (APPLE_START_LAT_SPAN / 2.0)))
+    west = max(-180.0, float(lon) - (APPLE_START_LON_SPAN / 2.0))
+    east = min(180.0, float(lon) + (APPLE_START_LON_SPAN / 2.0))
+    return west, south, east, north
+
+
+def set_windows_app_user_model_id() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
+def find_app_icon_path() -> Optional[Path]:
+    roots: List[Path] = []
+    try:
+        app_dir = Path(__file__).resolve().parent
+        roots.extend([
+            app_dir,
+            app_dir.parent / "INPUT_ICON_HERE",
+            app_dir.parent.parent / "INPUT_ICON_HERE",
+        ])
+    except Exception:
+        pass
+    try:
+        roots.append(Path.cwd())
+    except Exception:
+        pass
+    try:
+        roots.append(Path(sys.executable).resolve().parent)
+    except Exception:
+        pass
+
+    seen = set()
+    for root in roots:
+        try:
+            root = root.resolve()
+        except Exception:
+            continue
+        if root in seen:
+            continue
+        seen.add(root)
+        for name in APP_ICON_NAMES:
+            candidate = root / name
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def load_app_icon():
+    if QIcon is None:
+        return None
+    icon_path = find_app_icon_path()
+    if not icon_path:
+        return None
+    icon = QIcon(str(icon_path))
+    if icon.isNull():
+        return None
+    return icon
 
 
 def append_url_param(url: str, key: str, value: str) -> str:
@@ -1598,6 +1707,27 @@ def append_url_param(url: str, key: str, value: str) -> str:
         return url
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}{key}={value}"
+
+
+def apple_frame_step_multiplier_for_zoom(z: int) -> float:
+    """Return center-step multiplier for Apple frame screenshots.
+
+    Current z20 output moves map content by exactly half of the requested cell
+    size, while z18 fits. Treat the Apple frame as visually capped at z19 and
+    advance screenshot centers farther for requested zooms above that cap.
+    """
+    try:
+        zoom = int(z)
+    except Exception:
+        zoom = APPLE_FRAME_MAX_EFFECTIVE_ZOOM
+    capped_delta = max(0, zoom - int(APPLE_FRAME_MAX_EFFECTIVE_ZOOM))
+    scale = 2.0 ** float(capped_delta)
+    return max(1.0, min(20.0, float(scale)))
+
+
+def apple_frame_step_scale_for_zoom(z: int, axis: str) -> float:
+    """Compatibility wrapper for the hidden/manual X/Y step controls."""
+    return apple_frame_step_multiplier_for_zoom(z)
 
 
 
@@ -1629,6 +1759,10 @@ def configure_webengine_view(view):
         except Exception:
             pass
         try:
+            profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
+        except Exception:
+            pass
+        try:
             profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
         except Exception:
             pass
@@ -1642,6 +1776,84 @@ def open_url_in_browser(url: str) -> None:
         webbrowser.open(url)
     except Exception:
         pass
+
+
+def find_chromium_executable() -> Optional[str]:
+    names = ("chrome.exe", "msedge.exe", "chromium.exe", "chrome", "msedge", "chromium")
+    for name in names:
+        path = shutil.which(name)
+        if path:
+            return path
+
+    env_paths = []
+    for key in ("CHROME_PATH", "CHROMIUM_PATH", "EDGE_PATH"):
+        value = os.environ.get(key)
+        if value:
+            env_paths.append(Path(value))
+
+    program_roots = [
+        os.environ.get("PROGRAMFILES"),
+        os.environ.get("PROGRAMFILES(X86)"),
+        os.environ.get("LOCALAPPDATA"),
+    ]
+    for root in program_roots:
+        if not root:
+            continue
+        base = Path(root)
+        env_paths.extend([
+            base / "Google" / "Chrome" / "Application" / "chrome.exe",
+            base / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+            base / "Chromium" / "Application" / "chromium.exe",
+        ])
+
+    for path in env_paths:
+        try:
+            if path.exists() and path.is_file():
+                return str(path)
+        except Exception:
+            pass
+    return None
+
+
+def run_hidden_chromium_screenshot(
+    browser_path: str,
+    url: str,
+    output_png: Path,
+    width: int,
+    height: int,
+    wait_ms: int,
+    profile_dir: Path,
+) -> None:
+    output_png = Path(output_png)
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    wait_ms = max(1000, int(wait_ms))
+    cmd = [
+        str(browser_path),
+        "--headless=new",
+        "--disable-gpu",
+        "--hide-scrollbars",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-extensions",
+        f"--user-data-dir={str(profile_dir)}",
+        f"--window-size={max(1, int(width))},{max(1, int(height))}",
+        f"--virtual-time-budget={wait_ms}",
+        f"--screenshot={str(output_png)}",
+        str(url),
+    ]
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=max(30, int(wait_ms / 1000) + 30),
+    )
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stdout or "").splitlines()[-12:])
+        raise RuntimeError(f"Hidden Chromium screenshot failed with exit code {proc.returncode}: {tail}")
+    if not output_png.exists() or output_png.stat().st_size <= 0:
+        raise RuntimeError("Hidden Chromium did not create a screenshot file.")
 
 def leaflet_webengine_html(lon: float, lat: float, zoom: int, tile_template: str) -> str:
     """Leaflet/QWebEngine preview adapted from Mustatil Satellite Preview.
@@ -1660,19 +1872,19 @@ html,body,#map{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .crosshair{{position:absolute;left:50%;top:50%;width:18px;height:18px;margin-left:-9px;margin-top:-9px;pointer-events:none;z-index:1000}}
 .crosshair:before,.crosshair:after{{content:\"\";position:absolute;background:rgba(255,255,255,.88);box-shadow:0 0 2px #000}}
 .crosshair:before{{left:8px;top:0;width:2px;height:18px}}.crosshair:after{{left:0;top:8px;width:18px;height:2px}}
-</style></head><body><div id=\"map\"></div><div class=\"crosshair\"></div><div id=\"hint\" class=\"hint\">Shift+Drag oder Rechts-Drag: Feld markieren</div>
+</style></head><body><div id=\"map\"></div><div class=\"crosshair\"></div><div id=\"hint\" class=\"hint\">Shift+Drag or right-drag: select area</div>
 <script>
 (function(){{
 const TILE_TEMPLATE={json.dumps(tile_template or ESRI_WORLD_IMAGERY)};
 let bridge=null;
-const map=L.map('map',{{zoomControl:true,attributionControl:false,preferCanvas:true,inertia:true,zoomAnimation:true,fadeAnimation:true,updateWhenIdle:false,updateWhenZooming:false,wheelPxPerZoomLevel:96}}).setView([{float(clamp_lat(lat))},{float(lon)}],{int(zoom)});
+const map=L.map('map',{{zoomControl:false,attributionControl:false,preferCanvas:true,inertia:true,zoomAnimation:true,fadeAnimation:true,updateWhenIdle:false,updateWhenZooming:false,wheelPxPerZoomLevel:96}}).setView([{float(clamp_lat(lat))},{float(lon)}],{int(zoom)});
 let layer=L.tileLayer(TILE_TEMPLATE,{{tileSize:256,minZoom:0,maxZoom:22,maxNativeZoom:22,keepBuffer:5,updateWhenIdle:false,updateWhenZooming:false,detectRetina:false,crossOrigin:false}}).addTo(map);
-let selectionRect=null, selecting=false, startLatLng=null, forcedSelect=false;
+let selectionRect=null, selectedRect=null, selecting=false, startLatLng=null, forcedSelect=false;
 function hint(t){{document.getElementById('hint').textContent=t;}}
-function notifyMove(){{const c=map.getCenter();hint(`Google-Hybrid-Auswahlkarte | Zoom ${{map.getZoom()}} | lon ${{c.lng.toFixed(7)}} lat ${{c.lat.toFixed(7)}} | Mark Area oder Shift+Drag/Rechts-Drag`);if(bridge&&bridge.mapMoved)bridge.mapMoved(c.lng,c.lat,map.getZoom());}}
+function notifyMove(){{const c=map.getCenter();hint(`Selection map | Zoom ${{map.getZoom()}} | lon ${{c.lng.toFixed(7)}} lat ${{c.lat.toFixed(7)}} | Mark Area, Shift+Drag, or right-drag`);if(bridge&&bridge.mapMoved)bridge.mapMoved(c.lng,c.lat,map.getZoom());}}
 map.on('moveend zoomend',notifyMove);
 map.getContainer().addEventListener('contextmenu',function(e){{e.preventDefault();}});
-window.pymapStartMarkArea=function(){{forcedSelect=true;hint('Mark Area aktiv: jetzt mit linker Maustaste Rechteck ziehen. Esc = abbrechen.');map.dragging.disable();map.getContainer().classList.add('selecting');return true;}};
+window.pymapStartMarkArea=function(){{forcedSelect=true;hint('Mark Area active: drag a rectangle with the left mouse button. Esc cancels.');map.dragging.disable();map.getContainer().classList.add('selecting');return true;}};
 window.pymapCancelMarkArea=function(){{forcedSelect=false;selecting=false;startLatLng=null;if(selectionRect){{map.removeLayer(selectionRect);selectionRect=null;}}map.dragging.enable();map.getContainer().classList.remove('selecting');notifyMove();return true;}};
 document.addEventListener('keydown',function(e){{if(e.key==='Escape'&&forcedSelect)window.pymapCancelMarkArea();}},true);
 map.on('mousedown',function(e){{const oe=e.originalEvent||{{}};if(!(forcedSelect||oe.shiftKey||oe.button===2))return;selecting=true;startLatLng=e.latlng;map.dragging.disable();map.getContainer().classList.add('selecting');if(selectionRect)map.removeLayer(selectionRect);selectionRect=L.rectangle([startLatLng,startLatLng],{{color:'#00ffff',weight:2,fill:true,fillOpacity:.12,dashArray:'5,4'}}).addTo(map);}});
@@ -1682,16 +1894,239 @@ function finishSelection(e){{
   selecting=false;forcedSelect=false;map.dragging.enable();map.getContainer().classList.remove('selecting');
   const b=selectionRect.getBounds();
   const west=b.getWest(),south=b.getSouth(),east=b.getEast(),north=b.getNorth();
-  if(east<=west||north<=south||Math.abs(east-west)<1e-9||Math.abs(north-south)<1e-9){{hint('Auswahl ignoriert: Rechteck größer ziehen');return;}}
-  hint(`Auswahl eingetragen: W ${{west.toFixed(8)}} S ${{south.toFixed(8)}} E ${{east.toFixed(8)}} N ${{north.toFixed(8)}}`);
+  if(east<=west||north<=south||Math.abs(east-west)<1e-9||Math.abs(north-south)<1e-9){{hint('Selection ignored: draw a larger rectangle');return;}}
+  hint(`Selection saved: W ${{west.toFixed(8)}} S ${{south.toFixed(8)}} E ${{east.toFixed(8)}} N ${{north.toFixed(8)}}`);
   if(bridge&&bridge.selectionChanged)bridge.selectionChanged(west,south,east,north);
 }}
 map.on('mouseup',finishSelection);map.on('mouseout',function(e){{if(selecting)finishSelection(e);}});
+function drawSelectedBounds(west,south,east,north){{
+  const bounds=L.latLngBounds([Number(south),Number(west)],[Number(north),Number(east)]);
+  if(!selectedRect){{
+    selectedRect=L.rectangle(bounds,{{color:'#00ffff',weight:3,fill:true,fillOpacity:.12,dashArray:'7,4',interactive:false}}).addTo(map);
+  }}else{{
+    selectedRect.setBounds(bounds);
+  }}
+}}
+window.pymapSetSelectedBounds=function(west,south,east,north){{drawSelectedBounds(west,south,east,north);return true;}};
+window.pymapClearSelectedRect=function(){{if(selectedRect){{map.removeLayer(selectedRect);selectedRect=null;}}return true;}};
 window.pymapSetView=function(lon,lat,zoom,tileTemplate){{if(tileTemplate)layer.setUrl(tileTemplate);map.setView([lat,lon],zoom,{{animate:false}});setTimeout(function(){{map.invalidateSize(true);notifyMove();}},30);}};
 if(window.qt&&window.qt.webChannelTransport){{new QWebChannel(qt.webChannelTransport,function(channel){{bridge=channel.objects.pymapBridge;notifyMove();}});}}else{{notifyMove();}}
 setTimeout(function(){{map.invalidateSize(true);notifyMove();}},100);
 }})();
 </script></body></html>"""
+
+
+def apple_leaflet_webengine_html(lon: float, lat: float, zoom: int, frame_template: str) -> str:
+    """Show the Apple/frame page behind a Leaflet coordinate layer.
+
+    The iframe is display-only. Leaflet owns pan/zoom and Mark Area, so bbox
+    fields are never derived from Apple's embedded page.
+    """
+    html = """<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#111}
+#appleFrame{position:absolute;inset:0;width:100%;height:100%;border:0;background:#111;z-index:1;pointer-events:auto}
+#map{position:absolute;inset:0;width:100%;height:100%;z-index:2;background:transparent;pointer-events:none}
+#markLayer{position:absolute;inset:0;z-index:5;display:none;cursor:crosshair;background:rgba(0,0,0,0.001);pointer-events:auto}
+#markBox{position:absolute;display:none;border:3px solid #00ffff;background:rgba(0,255,255,.16);box-shadow:0 0 0 1px rgba(0,0,0,.75),0 0 12px rgba(0,255,255,.65);pointer-events:none}
+#selectedBox{position:absolute;z-index:4;display:none;border:3px solid #00ffff;background:rgba(0,255,255,.12);box-shadow:0 0 0 1px rgba(0,0,0,.8),0 0 18px rgba(0,255,255,.75);pointer-events:none}
+.leaflet-container{background:transparent;cursor:grab}
+.leaflet-container.selecting{cursor:crosshair}
+.leaflet-control-zoom{box-shadow:0 2px 10px rgba(0,0,0,.45)}
+.hint{position:absolute;left:10px;bottom:10px;z-index:1000;color:#eee;background:rgba(0,0,0,.72);font:12px/1.35 Arial,sans-serif;padding:7px 9px;border-radius:4px;user-select:none}
+.source{position:absolute;right:10px;bottom:10px;z-index:1000;color:#ddd;background:rgba(0,0,0,.62);font:12px/1.35 Arial,sans-serif;padding:7px 9px;border-radius:4px;user-select:none}
+.crosshair{position:absolute;left:50%;top:50%;width:18px;height:18px;margin-left:-9px;margin-top:-9px;pointer-events:none;z-index:1000}
+.crosshair:before,.crosshair:after{content:"";position:absolute;background:rgba(255,255,255,.9);box-shadow:0 0 2px #000}
+.crosshair:before{left:8px;top:0;width:2px;height:18px}.crosshair:after{left:0;top:8px;width:18px;height:2px}
+</style></head>
+<body>
+<iframe id="appleFrame" src="about:blank" allow="geolocation *; fullscreen *"></iframe>
+<div id="map"></div>
+<div id="markLayer"><div id="markBox"></div></div>
+<div id="selectedBox"></div>
+<div class="crosshair"></div>
+<div id="hint" class="hint">Apple view | Right-drag or Mark Area selects a fixed bbox</div>
+<div class="source">BBox source: fixed coordinate fields</div>
+<script>
+(function(){
+let FRAME_TEMPLATE=__FRAME_TEMPLATE__;
+let bridge=null;
+let lastFrameUrl='';
+const frame=document.getElementById('appleFrame');
+const markLayer=document.getElementById('markLayer');
+const markBox=document.getElementById('markBox');
+const selectedBox=document.getElementById('selectedBox');
+const map=L.map('map',{zoomControl:false,attributionControl:false,preferCanvas:true,inertia:true,zoomAnimation:true,fadeAnimation:true,zoomSnap:0.25,wheelPxPerZoomLevel:96}).setView([__INIT_LAT__,__INIT_LON__],__INIT_ZOOM__);
+const initialBounds=L.latLngBounds([__INIT_SOUTH__,__INIT_WEST__],[__INIT_NORTH__,__INIT_EAST__]);
+map.fitBounds(initialBounds,{animate:false,padding:[0,0]});
+let selectionRect=null, selecting=false, startLatLng=null, forcedSelect=false;
+let markStart=null, markDragging=false;
+let selectedBounds=null;
+let frameRefreshTimer=null;
+let frameNeedsTransformReset=false;
+let dragAnchorLatLng=null;
+let dragAnchorPoint=null;
+let lastBridgeMoveAt=0;
+
+function clampLat(lat){return Math.max(Math.min(Number(lat),85.05112878),-85.05112878);}
+function fmt(n){return Number(n).toFixed(12);}
+function hint(t){document.getElementById('hint').textContent=t;}
+function lonLatToTile(lon,lat,z){
+  const n=Math.pow(2,z);
+  const x=Math.floor((Number(lon)+180.0)/360.0*n);
+  const r=clampLat(lat)*Math.PI/180.0;
+  const y=Math.floor((1.0-Math.asinh(Math.tan(r))/Math.PI)/2.0*n);
+  return {x:Math.max(0,Math.min(n-1,x)),y:Math.max(0,Math.min(n-1,y))};
+}
+function quadKey(x,y,z){
+  let q='';
+  for(let i=z;i>0;i--){
+    let digit=0, mask=1<<(i-1);
+    if((x&mask)!==0)digit+=1;
+    if((y&mask)!==0)digit+=2;
+    q+=String(digit);
+  }
+  return q;
+}
+function replaceAllText(text, key, value){return text.split(key).join(String(value));}
+function frameUrl(){
+  const c=map.getCenter();
+  const z=Math.round(map.getZoom());
+  const b=map.getBounds();
+  const west=Math.max(-180,b.getWest()), south=Math.max(-85.05112878,b.getSouth()), east=Math.min(180,b.getEast()), north=Math.min(85.05112878,b.getNorth());
+  const latSpan=Math.min(170.10225756,Math.abs(north-south)), lonSpan=Math.min(360,Math.abs(east-west));
+  const tile=lonLatToTile(c.lng,c.lat,z);
+  const rnd=Math.floor(Math.random()*4);
+  const sub=['a','b','c'][rnd%3];
+  const bbox=`${fmt(west)},${fmt(south)},${fmt(east)},${fmt(north)}`;
+  let url=FRAME_TEMPLATE;
+  const repl={
+    '{x}':tile.x,'{y}':tile.y,'{z}':z,'{c}':z,'{q}':quadKey(tile.x,tile.y,z),'{quadkey}':quadKey(tile.x,tile.y,z),
+    '{rnd}':rnd,'{snum}':String(rnd%4),'{s}':sub,
+    '{west}':fmt(west),'{south}':fmt(south),'{east}':fmt(east),'{north}':fmt(north),
+    '{center_lon}':fmt(c.lng),'{center_lat}':fmt(c.lat),
+    '{lon_span}':fmt(lonSpan),'{lat_span}':fmt(latSpan),'{span_lon}':fmt(lonSpan),'{span_lat}':fmt(latSpan),
+    '{bbox}':bbox,'*GMX*':tile.x,'*GMY*':tile.y,'*ZM1*':z,'*IZM*':z,'*RND*':rnd,'*LAN*':'de','*LAN-LAN*':'de-DE'
+  };
+  Object.keys(repl).forEach(function(k){url=replaceAllText(url,k,repl[k]);});
+  return url;
+}
+function updateFrame(){
+  const url=frameUrl();
+  if(url!==lastFrameUrl){
+    lastFrameUrl=url;
+    frame.src=url;
+  }
+}
+function scheduleFrameUpdate(delay){
+  if(frameRefreshTimer)window.clearTimeout(frameRefreshTimer);
+  frameRefreshTimer=window.setTimeout(function(){frameRefreshTimer=null;updateFrame();},delay);
+}
+function sendBridgeMove(force){
+  if(!bridge||!bridge.mapMoved)return;
+  const now=Date.now();
+  if(!force&&now-lastBridgeMoveAt<90)return;
+  lastBridgeMoveAt=now;
+  const c=map.getCenter();
+  bridge.mapMoved(c.lng,c.lat,Math.round(map.getZoom()));
+}
+function updateHint(){
+  const c=map.getCenter();
+  const lockText=selectedBounds?' | BBox locked from fields':'';
+  hint(`Apple view | Leaflet zoom ${map.getZoom()} | lon ${c.lng.toFixed(7)} lat ${c.lat.toFixed(7)}${lockText} | Right-drag or Mark Area to select`);
+}
+function notifyMove(forceBridge){
+  updateHint();
+  sendBridgeMove(forceBridge!==false);
+}
+map.on('zoomend resize',function(){scheduleFrameUpdate(80);notifyMove();});
+map.on('moveend',function(){scheduleFrameUpdate(80);notifyMove();});
+map.getContainer().addEventListener('contextmenu',function(e){e.preventDefault();});
+function showMarkLayer(){
+  markLayer.style.display='block';
+  markBox.style.display='none';
+  markStart=null;
+  markDragging=false;
+  hint('Mark Area active: drag a rectangle. Apple drag resumes after selection.');
+}
+function hideMarkLayer(cancelled){
+  markLayer.style.display='none';
+  markBox.style.display='none';
+  markStart=null;
+  markDragging=false;
+  if(cancelled&&bridge&&bridge.markAreaCancelled)bridge.markAreaCancelled();
+}
+function drawMarkBox(x1,y1,x2,y2){
+  const x=Math.min(x1,x2), y=Math.min(y1,y2), w=Math.abs(x2-x1), h=Math.abs(y2-y1);
+  markBox.style.left=x+'px'; markBox.style.top=y+'px'; markBox.style.width=w+'px'; markBox.style.height=h+'px'; markBox.style.display='block';
+}
+function drawSelectedBox(x1,y1,x2,y2){
+  const x=Math.min(Number(x1),Number(x2)), y=Math.min(Number(y1),Number(y2)), w=Math.abs(Number(x2)-Number(x1)), h=Math.abs(Number(y2)-Number(y1));
+  selectedBox.style.left=x+'px'; selectedBox.style.top=y+'px'; selectedBox.style.width=w+'px'; selectedBox.style.height=h+'px'; selectedBox.style.display='block';
+}
+window.pymapShowSelectedRect=function(x1,y1,x2,y2){drawSelectedBox(x1,y1,x2,y2);return true;};
+function drawSelectedBounds(west,south,east,north){
+  selectedBox.style.display='none';
+  const bounds=L.latLngBounds([Number(south),Number(west)],[Number(north),Number(east)]);
+  selectedBounds=bounds;
+  if(!selectedRect){
+    selectedRect=L.rectangle(bounds,{color:'#00ffff',weight:3,fill:true,fillOpacity:.12,dashArray:'7,4',interactive:false}).addTo(map);
+  }else{
+    selectedRect.setBounds(bounds);
+  }
+  updateHint();
+}
+window.pymapSetSelectedBounds=function(west,south,east,north){drawSelectedBounds(west,south,east,north);return true;};
+window.pymapClearSelectedRect=function(){selectedBox.style.display='none';selectedBounds=null;if(selectedRect){map.removeLayer(selectedRect);selectedRect=null;}updateHint();return true;};
+window.pymapSyncLeafletView=function(lon,lat,zoom){return true;};
+window.pymapStartMarkArea=function(){forcedSelect=true;showMarkLayer();return true;};
+window.pymapCancelMarkArea=function(){forcedSelect=false;hideMarkLayer(true);notifyMove();return true;};
+document.addEventListener('keydown',function(e){if(e.key==='Escape'&&forcedSelect)window.pymapCancelMarkArea();},true);
+markLayer.addEventListener('mousedown',function(e){e.preventDefault();e.stopPropagation();markDragging=true;markStart={x:e.clientX,y:e.clientY};drawMarkBox(markStart.x,markStart.y,markStart.x,markStart.y);},true);
+markLayer.addEventListener('mousemove',function(e){if(!markDragging||!markStart)return;e.preventDefault();e.stopPropagation();drawMarkBox(markStart.x,markStart.y,e.clientX,e.clientY);},true);
+markLayer.addEventListener('mouseup',function(e){
+  if(!markDragging||!markStart)return;
+  e.preventDefault();e.stopPropagation();
+  const x1=markStart.x,y1=markStart.y,x2=e.clientX,y2=e.clientY;
+  markDragging=false;forcedSelect=false;
+  if(Math.abs(x2-x1)<4||Math.abs(y2-y1)<4){hint('Selection ignored: draw a larger rectangle');hideMarkLayer(true);return;}
+  if(bridge&&bridge.framePixelSelectionChanged)bridge.framePixelSelectionChanged(x1,y1,x2,y2,window.innerWidth,window.innerHeight);
+  hideMarkLayer(false);
+},true);
+map.on('mousedown',function(e){const oe=e.originalEvent||{};if(!(forcedSelect||oe.shiftKey||oe.button===2))return;selecting=true;startLatLng=e.latlng;map.dragging.disable();map.getContainer().classList.add('selecting');if(selectionRect)map.removeLayer(selectionRect);selectionRect=L.rectangle([startLatLng,startLatLng],{color:'#00ffff',weight:2,fill:true,fillOpacity:.12,dashArray:'5,4'}).addTo(map);});
+map.on('mousemove',function(e){if(selecting&&selectionRect&&startLatLng)selectionRect.setBounds(L.latLngBounds(startLatLng,e.latlng));});
+function finishSelection(e){
+  if(!selecting||!selectionRect)return;
+  selecting=false;forcedSelect=false;map.dragging.enable();map.getContainer().classList.remove('selecting');
+  const b=selectionRect.getBounds();
+  const west=b.getWest(),south=b.getSouth(),east=b.getEast(),north=b.getNorth();
+  if(east<=west||north<=south||Math.abs(east-west)<1e-9||Math.abs(north-south)<1e-9){hint('Selection ignored: draw a larger rectangle');return;}
+  selectedBounds=L.latLngBounds([south,west],[north,east]);
+  hint(`Selection saved: W ${west.toFixed(8)} S ${south.toFixed(8)} E ${east.toFixed(8)} N ${north.toFixed(8)}`);
+  if(bridge&&bridge.selectionChanged)bridge.selectionChanged(west,south,east,north);
+}
+map.on('mouseup',finishSelection);map.on('mouseout',function(e){if(selecting)finishSelection(e);});
+window.pymapSetView=function(lon,lat,zoom,frameTemplate){if(frameTemplate)FRAME_TEMPLATE=frameTemplate;map.setView([lat,lon],zoom,{animate:false});setTimeout(function(){map.invalidateSize(true);scheduleFrameUpdate(0);notifyMove();},30);};
+if(window.qt&&window.qt.webChannelTransport){new QWebChannel(qt.webChannelTransport,function(channel){bridge=channel.objects.pymapBridge;scheduleFrameUpdate(0);notifyMove();});}else{scheduleFrameUpdate(0);notifyMove();}
+setTimeout(function(){map.invalidateSize(true);scheduleFrameUpdate(0);notifyMove();},100);
+})();
+</script></body></html>"""
+    init_lat = float(clamp_lat(lat))
+    init_lon = float(lon)
+    init_west, init_south, init_east, init_north = apple_start_bbox(init_lon, init_lat)
+    return (html
+            .replace("__FRAME_TEMPLATE__", json.dumps(frame_template or MAP_PRESETS["Apple Frame Preview / center-span helper"]["url"]))
+            .replace("__INIT_LAT__", f"{init_lat:.12f}")
+            .replace("__INIT_LON__", f"{init_lon:.12f}")
+            .replace("__INIT_ZOOM__", str(int(zoom)))
+            .replace("__INIT_SOUTH__", f"{init_south:.12f}")
+            .replace("__INIT_WEST__", f"{init_west:.12f}")
+            .replace("__INIT_NORTH__", f"{init_north:.12f}")
+            .replace("__INIT_EAST__", f"{init_east:.12f}"))
 
 
 
@@ -1718,7 +2153,7 @@ iframe{{position:absolute;inset:0;width:100%;height:100%;border:0;background:#11
 <body>
 <iframe id=\"frame\" src={json.dumps(frame_url)} allow=\"geolocation *; fullscreen *\"></iframe>
 <div id=\"markLayer\"><div id=\"markBox\"></div></div>
-<div id=\"markHint\">Bereich markieren: ziehen und loslassen. Esc = abbrechen.</div>
+<div id=\"markHint\">Mark Area: drag and release. Esc cancels.</div>
 <script>
 (function(){{
 let bridge=null;
@@ -1770,8 +2205,8 @@ layer.addEventListener('mouseup', function(e){{
   if(!dragging || !start) return;
   e.preventDefault(); e.stopPropagation();
   let x1=start.x, y1=start.y, x2=e.clientX, y2=e.clientY;
-  if(Math.abs(x2-x1)<40 || Math.abs(y2-y1)<40){{
-    hint.textContent='Auswahl ignoriert: bitte ein größeres Rechteck ziehen.';
+  if(Math.abs(x2-x1)<4 || Math.abs(y2-y1)<4){{
+    hint.textContent='Selection ignored: draw a larger rectangle.';
     dragging=false;
     box.style.display='none';
     return;
@@ -1795,6 +2230,23 @@ if(window.qt && window.qt.webChannelTransport){{
 </body>
 </html>"""
 
+
+def frame_render_html(frame_url: str) -> str:
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000}}
+iframe{{position:absolute;inset:0;width:100%;height:100%;border:0;background:#000}}
+</style>
+</head>
+<body data-frame-loaded="0">
+<iframe id="frame" src={json.dumps(frame_url)} allow="geolocation *; fullscreen *" onload="document.body.dataset.frameLoaded='1'"></iframe>
+</body>
+</html>"""
+
 class WebBridge(QObject):
     def __init__(self, window):
         super().__init__(window)
@@ -1805,9 +2257,16 @@ class WebBridge(QObject):
         self.window.center_lon = float(lon)
         self.window.center_lat = float(lat)
         self.window.preview_zoom = int(zoom)
+        self.window.sync_preview_view_bbox_to_current_view()
+        self.window.redraw_preview_selection_from_coords()
         self.window.status_label.setText(
             f"Preview: zoom {int(zoom)} | lon {float(lon):.7f} lat {float(lat):.7f}"
         )
+
+    @Slot()
+    def markAreaCancelled(self) -> None:
+        self.window.preview_mark_mode = False
+        self.window.status_label.setText("Mark Area cancelled")
 
     @Slot(float, float, float, float)
     def selectionChanged(self, west: float, south: float, east: float, north: float) -> None:
@@ -1823,11 +2282,11 @@ class WebBridge(QObject):
         self.window.user_bbox_valid = True
         self.window.last_bbox_source = "mark_area"
         self.window.preview_exact_bbox = (west, south, east, north)
+        self.window.preview_mark_mode = False
 
-        # Critical fix for frame/Apple preview:
-        # iframe-internal panning cannot be reported to Python because of browser
-        # origin isolation. From now on the app-controlled preview center is the
-        # selected bbox center, so Calculate/Start use exactly the marked area.
+        # Match the reference workflow: the selector map becomes the app-owned
+        # coordinate state after selection. Apple/frame rendering still reads
+        # only the fixed bbox fields for download URL creation.
         self.window.center_lon = (west + east) / 2.0
         self.window.center_lat = (south + north) / 2.0
         try:
@@ -1839,6 +2298,7 @@ class WebBridge(QObject):
             f"Selection entered EXACTLY: South={south:.8f}, West={west:.8f}, North={north:.8f}, East={east:.8f}"
         )
         self.window.calculate()
+        self.window.redraw_preview_selection_from_coords()
         # Do not refresh/recenter iframe after selection; this caused jump-back.
 
     @Slot(float, float, float, float, float, float)
@@ -1857,41 +2317,13 @@ class WebBridge(QObject):
             px1, px2 = sorted([max(0.0, min(w, float(x1))), max(0.0, min(w, float(x2)))])
             py1, py2 = sorted([max(0.0, min(h, float(y1))), max(0.0, min(h, float(y2)))])
 
-            if abs(px2 - px1) < 40 or abs(py2 - py1) < 40:
+            if abs(px2 - px1) < 4 or abs(py2 - py1) < 4:
                 self.window.log_msg(
                     f"Frame Mark Area ignored: selection too small ({abs(px2 - px1):.0f}x{abs(py2 - py1):.0f}px). Draw a larger rectangle."
                 )
                 return
 
-            # Prefer a real, known app bbox. If there is no left-side bbox yet,
-            # use the preview_view_bbox created by current_preview_url(). This is
-            # now renderer-pixel based and may cover several cells; it is NOT the
-            # old one-XYZ-tile fallback that caused accidental 1 x 1 downloads.
-            source = "left bbox"
-            try:
-                if not bool(getattr(self.window, "user_bbox_valid", False)):
-                    raise ValueError("left bbox not user-valid")
-                view_west = float(self.window.min_lon_edit.text().replace(",", "."))
-                view_south = float(self.window.min_lat_edit.text().replace(",", "."))
-                view_east = float(self.window.max_lon_edit.text().replace(",", "."))
-                view_north = float(self.window.max_lat_edit.text().replace(",", "."))
-                if not (view_east > view_west and view_north > view_south):
-                    raise ValueError("invalid left bbox")
-            except Exception:
-                view_bbox = getattr(self.window, "preview_view_bbox", None)
-                if view_bbox and len(view_bbox) == 4:
-                    view_west, view_south, view_east, view_north = map(float, view_bbox)
-                    source = "known preview bbox"
-                else:
-                    z = int(self.window.zoom_spin.value())
-                    render_w = int(self.window.render_w_spin.value()) if hasattr(self.window, "render_w_spin") else int(w)
-                    render_h = int(self.window.render_h_spin.value()) if hasattr(self.window, "render_h_spin") else int(h)
-                    cells = float(self.window.frame_preview_cells_spin.value()) if hasattr(self.window, "frame_preview_cells_spin") else 4.0
-                    view_west, view_south, view_east, view_north = frame_view_bbox_for_center_zoom_pixels(
-                        self.window.center_lon, self.window.center_lat, z,
-                        max(w, render_w) * cells, max(h, render_h) * cells
-                    )
-                    source = f"renderer-pixel fallback ({cells:.1f} cells)"
+            view_west, view_south, view_east, view_north, source = self.window.selection_view_bbox_for_pixels(w, h)
 
             lon_span = view_east - view_west
             lat_span = view_north - view_south
@@ -1915,14 +2347,17 @@ class WebBridge(QObject):
 class PySideMapStitcher(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Py Map Stitcher 3 - Own Frame MultiView TIFF CPU")
+        self.setWindowTitle(APP_DISPLAY_TITLE)
+        icon = load_app_icon()
+        if icon is not None:
+            self.setWindowIcon(icon)
         self.resize(1320, 820)
         self.stop_event = threading.Event()
         self.worker_thread = None
         self.q = queue.Queue()
-        self.center_lon = 10.0
-        self.center_lat = 51.0
-        self.preview_zoom = 3
+        self.center_lon = APPLE_START_CENTER_LON
+        self.center_lat = APPLE_START_CENTER_LAT
+        self.preview_zoom = 1
         self.user_bbox_valid = False
         self.last_bbox_source = ""
         self.preview_exact_bbox = None
@@ -1941,6 +2376,8 @@ class PySideMapStitcher(QMainWindow):
         self.frame_mem = None
         self.frame_cfg = None
         self.frame_tile_dir = None
+        self.frame_chromium_thread = None
+        self.frame_chromium_browser = None
         self.frame_x_min = self.frame_y_min = 0
         self.frame_cell_w = self.frame_cell_h = TILE_SIZE
         self.frame_render_w_actual = self.frame_render_h_actual = 0
@@ -1957,7 +2394,13 @@ class PySideMapStitcher(QMainWindow):
         self.preview_exact_bbox = None
         self.preview_view_bbox = None
         self._google_selector_loaded = False
+        self._leaflet_selector_loaded = False
         self._google_selector_pending_mark = False
+        self._webview_drag_tracking = False
+        self._webview_drag_last = QPoint()
+        self._webview_drag_accum_dx = 0.0
+        self._webview_drag_accum_dy = 0.0
+        self._webview_filter_widgets = set()
         QTimer.singleShot(200, self.refresh_webmap)
 
     def _build_ui(self) -> None:
@@ -2015,18 +2458,20 @@ class PySideMapStitcher(QMainWindow):
         self.step_factor_y_spin.setSingleStep(0.05)
         self.step_factor_y_spin.setDecimals(3)
         self.step_factor_y_spin.setValue(0.0)
-        self.crop_left_spin = QSpinBox(); self.crop_left_spin.setRange(0, 1000); self.crop_left_spin.setValue(300)
+        self.crop_left_spin = QSpinBox(); self.crop_left_spin.setRange(0, 1000); self.crop_left_spin.setValue(APPLE_LEFT_BAR_CROP_PX)
         self.crop_right_spin = QSpinBox(); self.crop_right_spin.setRange(0, 1000); self.crop_right_spin.setValue(100)
         self.pixel_step_x_spin = QDoubleSpinBox()
         self.pixel_step_x_spin.setRange(0.25, 20.00)
-        self.pixel_step_x_spin.setSingleStep(0.25)
-        self.pixel_step_x_spin.setDecimals(2)
-        self.pixel_step_x_spin.setValue(1.00)
+        self.pixel_step_x_spin.setSingleStep(0.001)
+        self.pixel_step_x_spin.setDecimals(4)
+        self.pixel_step_x_spin.setValue(apple_frame_step_scale_for_zoom(self.zoom_spin.value(), "x"))
+        self.pixel_step_x_spin.setToolTip("Auto from zoom. Apple frame behaves like max z19: z20 uses 2.0, z21 uses 4.0, z22 uses 8.0.")
         self.pixel_step_y_spin = QDoubleSpinBox()
         self.pixel_step_y_spin.setRange(0.25, 20.00)
-        self.pixel_step_y_spin.setSingleStep(0.25)
-        self.pixel_step_y_spin.setDecimals(2)
-        self.pixel_step_y_spin.setValue(1.00)
+        self.pixel_step_y_spin.setSingleStep(0.001)
+        self.pixel_step_y_spin.setDecimals(4)
+        self.pixel_step_y_spin.setValue(apple_frame_step_scale_for_zoom(self.zoom_spin.value(), "y"))
+        self.pixel_step_y_spin.setToolTip("Auto from zoom. Apple frame behaves like max z19: z20 uses 2.0, z21 uses 4.0, z22 uses 8.0.")
         self.frame_shift_x_spin = QDoubleSpinBox()
         self.frame_shift_x_spin.setRange(-3000.0, 3000.0)
         self.frame_shift_x_spin.setSingleStep(10.0)
@@ -2045,7 +2490,7 @@ class PySideMapStitcher(QMainWindow):
         self.frame_preview_cells_spin.setSingleStep(0.5)
         self.frame_preview_cells_spin.setDecimals(1)
         self.frame_preview_cells_spin.setValue(4.0)
-        self.frame_preview_cells_spin.setToolTip("Nur Apple/Frame Mark Area ohne vorhandene BBox: Vorschaufläche in Renderer-Zellen. Höher = du kannst einen größeren Bereich markieren; verhindert 1x1 durch winzige Fallback-Span.")
+        self.frame_preview_cells_spin.setToolTip("Apple/Frame Mark Area without an existing bbox: preview area in renderer cells. Higher values allow selecting a larger area and prevent tiny fallback spans.")
 
         self.frame_min_cols_spin = QSpinBox()
         self.frame_min_cols_spin.setRange(1, 10000)
@@ -2055,9 +2500,9 @@ class PySideMapStitcher(QMainWindow):
         self.frame_min_rows_spin.setRange(1, 10000)
         self.frame_min_rows_spin.setValue(1)
         self.frame_min_rows_spin.setToolTip("Notfall/Test: erzwingt mindestens so viele Screenshot-Zeilen, auch wenn die berechnete BBox kleiner wirkt.")
-        self.hidden_render_check = QCheckBox()
+        self.hidden_render_check = QCheckBox("Use hidden Chromium renderer")
         self.hidden_render_check.setChecked(False)
-        self.hidden_render_check.setVisible(False)
+        self.hidden_render_check.setToolTip("Uses external Chrome/Edge headless screenshots when available. If no browser is found, the app falls back to Qt WebViews.")
         self.fullscreen_render_check = QCheckBox("Frame WebViews als eigene 1600x1600-Fenster")
         self.fullscreen_render_check.setChecked(True)
         self.fullscreen_render_check.setToolTip("Öffnet jeden Renderer als eigenes festes Fenster in Render-W/H. Nicht maximieren, damit Pixelrechnung exakt bleibt.")
@@ -2077,6 +2522,7 @@ class PySideMapStitcher(QMainWindow):
         form.addRow("East / max lon", self.max_lon_edit)
         form.addRow("Download Threads", self.workers_spin)
         form.addRow("Frame WebViews", self.frame_views_spin)
+        form.addRow("", self.hidden_render_check)
 
         out_row = QHBoxLayout()
         out_row.addWidget(self.outfile_edit, 1)
@@ -2095,6 +2541,7 @@ class PySideMapStitcher(QMainWindow):
         stop_btn.clicked.connect(self.stop_event.set)
         btn_row.addWidget(calc_btn); btn_row.addWidget(start_btn); btn_row.addWidget(stop_btn)
         left_layout.addLayout(btn_row)
+        self.zoom_spin.valueChanged.connect(self.update_zoom_dependent_pixel_steps)
 
         terms = QLabel("Only use servers where downloading/stitching is allowed. Google/Bing/OSM may restrict bulk downloads.")
         terms.setWordWrap(True)
@@ -2117,7 +2564,7 @@ class PySideMapStitcher(QMainWindow):
         splitter.setStretchFactor(1, 1)
 
         map_header = QHBoxLayout()
-        map_title = QLabel("Satellite WebMap / Selection like Mustatil Satellite Preview")
+        map_title = QLabel("Apple Frame Preview / Leaflet Selection")
         map_title.setStyleSheet("font-weight: 600;")
         map_header.addWidget(map_title, 1)
         self.preview_mode_combo = QComboBox()
@@ -2130,6 +2577,9 @@ class PySideMapStitcher(QMainWindow):
         browser_btn = QPushButton("Open in Browser")
         browser_btn.clicked.connect(self.open_current_preview_in_browser)
         map_header.addWidget(browser_btn)
+        leaflet_selector_btn = QPushButton("Accurate Leaflet Selector")
+        leaflet_selector_btn.clicked.connect(self.load_accurate_leaflet_selector)
+        map_header.addWidget(leaflet_selector_btn)
         self.mark_area_btn = QPushButton("Mark Area")
         self.mark_area_btn.clicked.connect(self.start_mark_area)
         map_header.addWidget(self.mark_area_btn)
@@ -2142,6 +2592,7 @@ class PySideMapStitcher(QMainWindow):
         configure_webengine_view(self.webview)
         self.webview.setStyleSheet("background:#111;")
         self.webview.installEventFilter(self)
+        QTimer.singleShot(0, self._install_webview_mouse_filters)
         self.preview_mark_mode = False
         self.preview_selecting = False
         self.preview_select_start = QPoint()
@@ -2164,6 +2615,18 @@ class PySideMapStitcher(QMainWindow):
 
         splitter.setSizes([420, 900])
 
+    def update_zoom_dependent_pixel_steps(self, z: Optional[int] = None) -> None:
+        try:
+            zoom = int(self.zoom_spin.value() if z is None else z)
+            x_scale = apple_frame_step_scale_for_zoom(zoom, "x")
+            y_scale = apple_frame_step_scale_for_zoom(zoom, "y")
+            for spin, value in ((self.pixel_step_x_spin, x_scale), (self.pixel_step_y_spin, y_scale)):
+                spin.blockSignals(True)
+                spin.setValue(float(value))
+                spin.blockSignals(False)
+        except Exception:
+            pass
+
     def _mark_manual_bbox_edit(self, *_args) -> None:
         self.user_bbox_valid = True
         self.last_bbox_source = "manual"
@@ -2178,6 +2641,7 @@ class PySideMapStitcher(QMainWindow):
         self.last_bbox_source = ""
         self.preview_exact_bbox = None
         self.preview_view_bbox = None
+        self.hide_preview_selection_rect()
         if log:
             self.log_msg("BBox cleared: Apple/Frame mode will not use any preset mini bbox. Mark an area or enter coordinates before Start.")
 
@@ -2214,40 +2678,166 @@ class PySideMapStitcher(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Preview selected bbox", f"Could not preview selected bbox: {exc}")
 
-    def load_google_hybrid_selection_map(self, reason: str = "") -> None:
-        """Load Google Hybrid only as the coordinate selector.
+    def show_preview_selection_rect(self, x1: float, y1: float, x2: float, y2: float) -> None:
+        try:
+            js = (
+                "if(window.pymapShowSelectedRect){"
+                f"window.pymapShowSelectedRect({float(x1):.3f},{float(y1):.3f},{float(x2):.3f},{float(y2):.3f});"
+                "true;} else {false;}"
+            )
+            self.webview.page().runJavaScript(js)
+        except Exception:
+            pass
 
-        The URL template on the left is NOT changed. Therefore Apple/Frame can be
-        selected for download, while this preview remains a stable Leaflet map for
-        drawing the bbox. This avoids reading any geometry from Apple WebView.
+    def hide_preview_selection_rect(self) -> None:
+        try:
+            self.webview.page().runJavaScript("if(window.pymapClearSelectedRect){window.pymapClearSelectedRect(); true;} else {false;}")
+        except Exception:
+            pass
+
+    def selected_bbox_from_fields_or_memory(self) -> Optional[Tuple[float, float, float, float]]:
+        exact = getattr(self, "preview_exact_bbox", None)
+        if exact and len(exact) == 4:
+            try:
+                west, south, east, north = map(float, exact)
+                if east > west and north > south:
+                    return west, south, east, north
+            except Exception:
+                pass
+        if bool(getattr(self, "user_bbox_valid", False)):
+            try:
+                return self.read_bbox_values()
+            except Exception:
+                pass
+        return None
+
+    def redraw_preview_selection_from_coords(self) -> None:
+        bbox = self.selected_bbox_from_fields_or_memory()
+        if not bbox:
+            self.hide_preview_selection_rect()
+            return
+        try:
+            west, south, east, north = map(float, bbox)
+            js = (
+                "if(window.pymapSetSelectedBounds){"
+                f"window.pymapSetSelectedBounds({west:.12f},{south:.12f},{east:.12f},{north:.12f});"
+                "true;} else {false;}"
+            )
+            self.webview.page().runJavaScript(js)
+        except Exception:
+            self.hide_preview_selection_rect()
+
+    def sync_leaflet_overlay_view(self) -> None:
+        try:
+            js = (
+                "if(window.pymapSyncLeafletView){"
+                f"window.pymapSyncLeafletView({float(self.center_lon):.12f},{float(self.center_lat):.12f},{int(self.preview_zoom)});"
+                "true;} else {false;}"
+            )
+            self.webview.page().runJavaScript(js)
+        except Exception:
+            pass
+
+    def apple_selector_zoom(self) -> int:
+        try:
+            z = int(getattr(self, "preview_zoom", 1))
+        except Exception:
+            z = 1
+        return max(APPLE_SELECTOR_MIN_ZOOM, min(22, z))
+
+    def selection_view_bbox_for_pixels(self, width: float, height: float) -> Tuple[float, float, float, float, str]:
+        apple_frame = is_apple_frame_template(self.url_edit.text().strip())
+        if apple_frame:
+            try:
+                z = self.apple_selector_zoom()
+                w = max(1.0, float(width))
+                h = max(1.0, float(height))
+                west, south, east, north = frame_view_bbox_for_center_zoom_pixels(
+                    float(self.center_lon), float(self.center_lat), z, w, h
+                )
+                if east > west and north > south:
+                    self.preview_view_bbox = (west, south, east, north)
+                    return west, south, east, north, f"safe Apple selector bbox (z={z})"
+            except Exception:
+                pass
+
+            # Last-resort fallback: still never use the wide world-start bbox for
+            # Mark Area. A bounded z=8 viewport prevents accidental ocean/world
+            # selections from becoming multi-terabyte screenshot jobs.
+            west, south, east, north = frame_view_bbox_for_center_zoom_pixels(
+                float(self.center_lon), float(self.center_lat), APPLE_SELECTOR_MIN_ZOOM,
+                max(1.0, float(width)), max(1.0, float(height))
+            )
+            self.preview_view_bbox = (west, south, east, north)
+            return west, south, east, north, f"bounded Apple selector fallback (z={APPLE_SELECTOR_MIN_ZOOM})"
+
+        view_bbox = getattr(self, "preview_view_bbox", None)
+        if view_bbox and len(view_bbox) == 4:
+            west, south, east, north = map(float, view_bbox)
+            if east > west and north > south:
+                return west, south, east, north, "known preview bbox"
+
+        z = int(self.zoom_spin.value())
+        render_w = int(self.render_w_spin.value()) if hasattr(self, "render_w_spin") else int(width)
+        render_h = int(self.render_h_spin.value()) if hasattr(self, "render_h_spin") else int(height)
+        cells = float(self.frame_preview_cells_spin.value()) if hasattr(self, "frame_preview_cells_spin") else 4.0
+        west, south, east, north = frame_view_bbox_for_center_zoom_pixels(
+            float(self.center_lon), float(self.center_lat), z,
+            max(float(width), float(render_w)) * cells,
+            max(float(height), float(render_h)) * cells
+        )
+        self.preview_view_bbox = (west, south, east, north)
+        return west, south, east, north, f"renderer-pixel fallback ({cells:.1f} cells)"
+
+    def load_google_hybrid_selection_map(self, reason: str = "") -> None:
+        """Load Google Hybrid/Leaflet only as the coordinate selector.
+
+        The URL template on the left is NOT changed. Therefore Apple/Frame can
+        remain the renderer/download template, while this preview supplies the
+        bbox coordinates exactly like the reference app.
         """
         try:
             try:
                 self.preview_zoom = int(self.zoom_spin.value())
             except Exception:
                 pass
+            self.preview_view_bbox = None
             html = leaflet_webengine_html(
                 float(self.center_lon),
                 float(self.center_lat),
                 int(self.preview_zoom),
                 GOOGLE_HYBRID_SELECTOR,
             )
-            self.preview_view_bbox = None
             self._google_selector_loaded = True
+            self._leaflet_selector_loaded = True
             self.webview.setHtml(html, QUrl("https://mustatil.local/"))
-            self.status_label.setText("Google Hybrid selector loaded - download still uses the Apple URL template")
-            self.log_msg("Google-Hybrid-Auswahlkarte aktiv: Markierung schreibt nur die vier BBox-Felder; Download nutzt weiter die URL links." + (f" ({reason})" if reason else ""))
+            QTimer.singleShot(250, self._install_webview_mouse_filters)
+            QTimer.singleShot(450, self.redraw_preview_selection_from_coords)
+            self.status_label.setText("Google Hybrid selector loaded - download still uses the Apple/Frame URL template")
+            self.log_msg(
+                "Google Hybrid selector active: Mark Area writes only the four bbox fields; "
+                "download still uses the URL template on the left."
+                + (f" ({reason})" if reason else "")
+            )
         except Exception as exc:
             self.log_msg(f"Google Hybrid selector failed: {exc}")
 
-    def start_mark_area(self) -> None:
-        """Enable Mark Area. For Apple/frame downloads, select on Google Hybrid."""
+    def load_accurate_leaflet_selector(self) -> None:
+        """Alternative selector: pure Leaflet map, exact bbox from Leaflet bounds."""
         try:
+            self.load_google_hybrid_selection_map("manual selector")
+        except Exception as exc:
+            self.log_msg(f"Accurate Leaflet selector failed: {exc}")
+
+    def start_mark_area(self) -> None:
+        """Enable Mark Area. For Apple/frame downloads, select on Leaflet."""
+        try:
+            self.preview_mark_mode = True
             url_template = self.url_edit.text().strip()
             preset = MAP_PRESETS.get(self.preset_combo.currentText(), {})
             if preset.get("preview") == "frame" or is_frame_template(url_template):
                 # Critical workflow fix: use Google Hybrid/Leaflet for coordinate
-                # selection, but do not change cfg.url_template. Start still uses
+                # but do not change cfg.url_template. Start still uses
                 # Apple/Frame URL + the four coordinate fields.
                 if not bool(getattr(self, "_google_selector_loaded", False)):
                     self.load_google_hybrid_selection_map("Apple/Frame download mode")
@@ -2255,18 +2845,113 @@ class PySideMapStitcher(QMainWindow):
                     return
 
             js = "if(window.pymapStartMarkArea){window.pymapStartMarkArea(); true;} else {false;}"
-            self.webview.page().runJavaScript(js, lambda ok: self.log_msg(
-                "Mark Area active: ziehe jetzt im Preview-Fenster einen Kasten." if ok
-                else "Mark Area konnte nicht aktiviert werden. Preview neu laden und Google/Leaflet-Auswahlkarte nutzen."
-            ))
-            self.status_label.setText("Mark Area active: im Preview-Fenster ziehen. Esc = abbrechen.")
+            def _mark_started(ok):
+                if not ok:
+                    self.preview_mark_mode = False
+                self.log_msg(
+                    "Mark Area active: drag a rectangle in the preview." if ok
+                    else "Could not start Mark Area. Reload the preview and try again."
+                )
+            self.webview.page().runJavaScript(js, _mark_started)
+            self.status_label.setText("Mark Area active: drag in the preview. Esc cancels.")
         except Exception as exc:
             self.log_msg(f"Mark Area failed: {exc}")
 
 
+    def _install_webview_mouse_filters(self) -> None:
+        """Catch right-drag selection events on the WebEngine child widgets too."""
+        try:
+            widgets = [self.webview]
+            try:
+                widgets.extend(self.webview.findChildren(QWidget))
+            except Exception:
+                pass
+            installed = getattr(self, "_webview_filter_widgets", set())
+            for widget in widgets:
+                key = id(widget)
+                if key in installed:
+                    continue
+                try:
+                    widget.installEventFilter(self)
+                    installed.add(key)
+                except Exception:
+                    pass
+            self._webview_filter_widgets = installed
+        except Exception:
+            pass
+
+    def _is_preview_widget(self, obj) -> bool:
+        try:
+            if obj is self.webview:
+                return True
+            if isinstance(obj, QWidget) and self.webview.isAncestorOf(obj):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _event_pos_in_webview(self, obj, event) -> QPoint:
+        try:
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        except Exception:
+            return QPoint()
+        try:
+            if obj is not self.webview and isinstance(obj, QWidget):
+                pos = obj.mapTo(self.webview, pos)
+        except Exception:
+            pass
+        return pos
+
+    def _ensure_preview_rubber_band(self):
+        if self.preview_rubber_band is None and QRubberBand is not None:
+            shape = QRubberBand.Shape.Rectangle if hasattr(QRubberBand, "Shape") else QRubberBand.Rectangle
+            self.preview_rubber_band = QRubberBand(shape, self.webview)
+        return self.preview_rubber_band
+
+    def _finish_webview_drag_tracking(self) -> None:
+        if not bool(getattr(self, "_webview_drag_tracking", False)):
+            return
+        dx = float(getattr(self, "_webview_drag_accum_dx", 0.0))
+        dy = float(getattr(self, "_webview_drag_accum_dy", 0.0))
+        self._webview_drag_tracking = False
+        self._webview_drag_accum_dx = 0.0
+        self._webview_drag_accum_dy = 0.0
+        if abs(dx) >= 1.0 or abs(dy) >= 1.0:
+            self.pan_preview_model_by_pixels(dx, dy)
+
+    def sync_preview_view_bbox_to_current_view(self) -> None:
+        try:
+            w = max(1, int(self.webview.width()))
+            h = max(1, int(self.webview.height()))
+            if is_apple_frame_template(self.url_edit.text().strip()):
+                z = self.apple_selector_zoom()
+            else:
+                z = int(self.preview_zoom)
+            self.preview_view_bbox = frame_view_bbox_for_center_zoom_pixels(
+                float(self.center_lon), float(self.center_lat), z, w, h
+            )
+        except Exception:
+            self.preview_view_bbox = None
+
+    def pan_preview_model_by_pixels(self, dx: float, dy: float) -> None:
+        try:
+            z = int(self.preview_zoom)
+            cx, cy = lonlat_to_world_pixel(float(self.center_lon), float(self.center_lat), z)
+            lon, lat = world_pixel_to_lonlat(cx - float(dx), cy - float(dy), z)
+            self.center_lon = float(lon)
+            self.center_lat = float(clamp_lat(lat))
+            self.sync_preview_view_bbox_to_current_view()
+            self.sync_leaflet_overlay_view()
+            self.redraw_preview_selection_from_coords()
+            self.status_label.setText(
+                f"Apple viewport: zoom {z} | lon {self.center_lon:.7f} lat {self.center_lat:.7f}"
+            )
+        except Exception:
+            pass
+
     def eventFilter(self, obj, event):
-        # No QWidget overlay over QWebEngine: on Windows this can turn the WebView white.
-        # Mark Area is handled by JS inside frame_preview_html.
+        # Like the reference app: no QWidget/Python mouse overlay over QWebEngine.
+        # Leaflet and the in-page JS selection layer receive drag events directly.
         return super().eventFilter(obj, event)
 
     def apply_preview_pixel_selection(self, p1: QPoint, p2: QPoint) -> None:
@@ -2281,26 +2966,13 @@ class PySideMapStitcher(QMainWindow):
             px1, px2 = sorted([x1, x2])
             py1, py2 = sorted([y1, y2])
 
-            if abs(px2 - px1) < 40 or abs(py2 - py1) < 40:
+            if abs(px2 - px1) < 4 or abs(py2 - py1) < 4:
                 self.log_msg(
                     f"Python Mark Area ignored: selection too small ({abs(px2 - px1):.0f}x{abs(py2 - py1):.0f}px). Draw a larger rectangle."
                 )
                 return
 
-            view_bbox = getattr(self, "preview_view_bbox", None)
-            source = "known preview bbox"
-            if view_bbox and len(view_bbox) == 4:
-                view_west, view_south, view_east, view_north = map(float, view_bbox)
-            else:
-                z = int(self.zoom_spin.value())
-                render_w = int(self.render_w_spin.value()) if hasattr(self, "render_w_spin") else int(w)
-                render_h = int(self.render_h_spin.value()) if hasattr(self, "render_h_spin") else int(h)
-                cells = float(self.frame_preview_cells_spin.value()) if hasattr(self, "frame_preview_cells_spin") else 4.0
-                view_west, view_south, view_east, view_north = frame_view_bbox_for_center_zoom_pixels(
-                    float(self.center_lon), float(self.center_lat), z,
-                    max(float(w), float(render_w)) * cells, max(float(h), float(render_h)) * cells
-                )
-                source = f"renderer-pixel fallback ({cells:.1f} cells)"
+            view_west, view_south, view_east, view_north, source = self.selection_view_bbox_for_pixels(float(w), float(h))
 
             lon_span = view_east - view_west
             lat_span = view_north - view_south
@@ -2392,7 +3064,8 @@ class PySideMapStitcher(QMainWindow):
         if preset.get("preview") == "frame" or is_frame_template(preset.get("url", "")):
             self.clear_bbox_fields(log=True)
             self._google_selector_loaded = False
-            self.log_msg("Apple/Frame workflow: rechts wird Google Hybrid zum Markieren benutzt; Start nutzt nur die Apple-URL links + BBox-Felder.")
+            self._leaflet_selector_loaded = False
+            self.log_msg("Apple/Frame workflow: the right side uses the Google Hybrid/Leaflet selector; Start uses only the URL on the left plus the bbox fields.")
         self.refresh_webmap()
 
     def refresh_webmap(self) -> None:
@@ -2411,16 +3084,16 @@ class PySideMapStitcher(QMainWindow):
                 url_template or ESRI_WORLD_IMAGERY,
             )
             self._google_selector_loaded = False
+            self._leaflet_selector_loaded = False
             self.webview.setHtml(html, QUrl("https://mustatil.local/"))
             self.status_label.setText("Leaflet tile preview loaded")
             self.log_msg(f"Preview mode: Leaflet tiles | template: {url_template}")
             return
 
         if preset.get("preview") == "frame" or is_frame_template(url_template):
-            # Stable workflow: select bbox in Google Hybrid/Leaflet, but keep the
-            # Apple/Frame URL template on the left for download. This fixes the
-            # Apple WebView state problem where the second run could reuse one old
-            # place or jump back to a start location.
+            # Same stable workflow as the reference app: select bbox in
+            # Google Hybrid/Leaflet, but keep the Apple/Frame URL template on
+            # the left for rendering/download.
             if preview_mode != "Direct URL":
                 self.load_google_hybrid_selection_map("refresh")
                 return
@@ -2434,7 +3107,8 @@ class PySideMapStitcher(QMainWindow):
                 pass
             self.webview.load(QUrl(url))
             self._google_selector_loaded = False
-            self.status_label.setText("Frame URL loaded directly for inspection only - use Google selector for Mark Area")
+            self._leaflet_selector_loaded = False
+            self.status_label.setText("Frame URL loaded directly for inspection only - use Google Hybrid selector for Mark Area")
             self.log_msg(f"Preview mode: direct frame URL inspection | URL: {url}")
             return
 
@@ -2445,6 +3119,7 @@ class PySideMapStitcher(QMainWindow):
             url_template or ESRI_WORLD_IMAGERY,
         )
         self._google_selector_loaded = False
+        self._leaflet_selector_loaded = False
         self.webview.setHtml(html, QUrl("https://mustatil.local/"))
         self.status_label.setText("WebMap loaded - Shift+Drag or right-drag to select extent")
 
@@ -2458,8 +3133,9 @@ class PySideMapStitcher(QMainWindow):
             west, south, east, north = self.read_bbox_values()
         except Exception as exc:
             raise RuntimeError("No valid download bbox. Draw a real Mark Area or enter South/West/North/East manually; no tiny preset bbox is used anymore.") from exc
+        url_template = self.url_edit.text().strip() or MAP_PRESETS["Apple Frame Preview / center-span helper"]["url"]
         return StitchConfig(
-            url_template=MAP_PRESETS["Apple Frame Preview / center-span helper"]["url"],
+            url_template=url_template,
             output_file=Path(self.outfile_edit.text()).expanduser(),
             z=int(self.zoom_spin.value()),
             min_lat=south,
@@ -2471,15 +3147,41 @@ class PySideMapStitcher(QMainWindow):
             chunk_size=int(self.chunk_spin.value()),
         )
 
+    def frame_grid_limit_message(self, cols: int, rows: int, width: int, height: int, raw_bytes: int) -> Optional[str]:
+        total_cells = int(cols) * int(rows)
+        if int(raw_bytes) > MAX_DIRECT_TIFF_BYTES:
+            return (
+                f"Selected area exceeds the hard BigTIFF safety limit: {format_bytes(raw_bytes)}. "
+                "Select a smaller bbox or reduce the download zoom."
+            )
+        if total_cells > MAX_FRAME_SCREENSHOT_CELLS:
+            return (
+                f"Selected area is too large for one screenshot job: {cols} x {rows} = {total_cells:,} cells. "
+                f"The safety limit is {MAX_FRAME_SCREENSHOT_CELLS:,} cells. Zoom in, select a smaller bbox, or split the area."
+            )
+        if int(raw_bytes) > MAX_FRAME_SCREENSHOT_BYTES:
+            return (
+                f"Selected area is too large for one BigTIFF: {format_bytes(raw_bytes)} estimated raw payload "
+                f"({width:,} x {height:,} px). The safety limit is {format_bytes(MAX_FRAME_SCREENSHOT_BYTES)}. "
+                "Zoom in, select a smaller bbox, or split the area."
+            )
+        return None
+
     def calculate(self) -> None:
         try:
             cfg = self._config()
             render_w = int(self.render_w_spin.value())
             render_h = int(self.render_h_spin.value())
-            crop_left = int(self.crop_left_spin.value())
+            crop_left = APPLE_LEFT_BAR_CROP_PX
             crop_top = int(self.crop_top_spin.value())
             crop_right = int(self.crop_right_spin.value())
             crop_bottom = int(self.crop_bottom_spin.value())
+            self.frame_crop_left = int(crop_left)
+            self.frame_crop_top = int(crop_top)
+            self.frame_crop_right = int(crop_right)
+            self.frame_crop_bottom = int(crop_bottom)
+            self.frame_wait_ms = int(self.rate_spin.value())
+            self.frame_extra_wait_ms = int(self.frame_settle_extra_spin.value())
             visible_w = max(1, render_w - crop_left - crop_right)
             visible_h = max(1, render_h - crop_top - crop_bottom)
 
@@ -2490,11 +3192,11 @@ class PySideMapStitcher(QMainWindow):
             selected_width_px = max(1.0, sel_right_px - sel_left_px)
             selected_height_px = max(1.0, sel_bottom_px - sel_top_px)
 
-            step_mult_x = float(self.pixel_step_x_spin.value()) if hasattr(self, "pixel_step_x_spin") else 1.0
-            step_mult_y = float(self.pixel_step_y_spin.value()) if hasattr(self, "pixel_step_y_spin") else 1.0
+            step_mult_x = apple_frame_step_multiplier_for_zoom(cfg.z)
+            step_mult_y = apple_frame_step_multiplier_for_zoom(cfg.z)
             shift_x_px = FIXED_FRAME_SHIFT_X_PX
             shift_y_px = FIXED_FRAME_SHIFT_Y_PX
-            crop_correct_url = bool(getattr(self, "crop_correct_url_check", None) and self.crop_correct_url_check.isChecked())
+            crop_correct_url = True
             effective_step_x_px = max(1.0, float(visible_w) * step_mult_x + shift_x_px)
             effective_step_y_px = max(1.0, float(visible_h) * step_mult_y + shift_y_px)
 
@@ -2518,9 +3220,7 @@ class PySideMapStitcher(QMainWindow):
                 crop_left, crop_top, crop_right, crop_bottom,
                 step_mult_x, step_mult_y, shift_x_px, shift_y_px, crop_correct_url,
             )
-            anchor_crop_bounds = cropped_frame_bounds_from_request_bounds(
-                _sample_request_calc, cfg.z, render_w, render_h, crop_left, crop_top, crop_right, crop_bottom
-            )
+            anchor_crop_bounds = _sample_visible_calc
             anchor_left_px, anchor_top_px = lonlat_to_world_pixel(anchor_crop_bounds[0], anchor_crop_bounds[3], cfg.z)
             grid_right_px = anchor_left_px + cols * float(visible_w)
             grid_bottom_px = anchor_top_px + rows * float(visible_h)
@@ -2539,11 +3239,22 @@ class PySideMapStitcher(QMainWindow):
             self.log_msg(f"Grid coverage: S={grid_south:.8f}, W={grid_west:.8f}, N={grid_north:.8f}, E={grid_east:.8f}")
             self.log_msg(f"Render size: {render_w}x{render_h}; crop L/T/R/B={crop_left}/{crop_top}/{crop_right}/{crop_bottom}")
             self.log_msg(f"Visible output cell: {visible_w}x{visible_h} px")
-            self.log_msg(f"Effective step: X={effective_step_x_px:.1f}px, Y={effective_step_y_px:.1f}px; multiplier={step_mult_x:.3f}/{step_mult_y:.3f}; shift={shift_x_px:.1f}/{shift_y_px:.1f}px")
+            self.log_msg(
+                "Logical center mode: Apple URL center is computed from the cropped cell center and crop offsets; "
+                "for zooms above Apple's effective frame zoom the center step is scaled."
+            )
+            self.log_msg(
+                f"Apple effective zoom cap: z{APPLE_FRAME_MAX_EFFECTIVE_ZOOM}; requested z={cfg.z}; "
+                f"step multiplier X/Y={step_mult_x:.4f}/{step_mult_y:.4f}"
+            )
+            self.log_msg(f"Effective step: X={effective_step_x_px:.1f}px, Y={effective_step_y_px:.1f}px; crop-center correction L/T/R/B={crop_left}/{crop_top}/{crop_right}/{crop_bottom}")
             if cols != calc_cols or rows != calc_rows:
                 self.log_msg(f"Force min grid applied: calculated {calc_cols} x {calc_rows}, using {cols} x {rows}.")
             self.log_msg(f"Grid cells: {cols} x {rows} = {cols*rows:,}; output pixels: {width:,} x {height:,}")
             self.log_msg(f"Estimated raw BigTIFF payload: {format_bytes(raw_bytes)}")
+            limit_msg = self.frame_grid_limit_message(cols, rows, width, height, raw_bytes)
+            if limit_msg:
+                self.log_msg(f"Start will be blocked: {limit_msg}")
 
             sample_url, sample_visible, sample_request = expand_frame_url_grid(
                 cfg.url_template, 0, 0, cfg.z,
@@ -2558,7 +3269,9 @@ class PySideMapStitcher(QMainWindow):
             self.log_msg(f"Sample cell 0/0 visible={sample_visible}")
             self.log_msg(f"Sample cell 0/0 request={sample_request}")
             self.log_msg(f"Sample URL: {sample_url}")
-            self.log_msg("Alignment mode: NoDoubleCrop is default. Request bounds equal visible bounds unless Crop URL correction is enabled.")
+            self.log_msg(
+                f"Alignment mode: logical crop-center with Apple effective z{APPLE_FRAME_MAX_EFFECTIVE_ZOOM} step scaling."
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Error", str(exc))
 
@@ -2596,7 +3309,6 @@ class PySideMapStitcher(QMainWindow):
         north = float(cfg.max_lat)
         self.center_lon = (west + east) / 2.0
         self.center_lat = (south + north) / 2.0
-        self.preview_zoom = int(cfg.z)
         self.preview_exact_bbox = (west, south, east, north)
         self.preview_view_bbox = (west, south, east, north)
         self.user_bbox_valid = True
@@ -2621,6 +3333,20 @@ class PySideMapStitcher(QMainWindow):
         width = img.width(); height = img.height(); bpl = img.bytesPerLine()
         data = bytes(img.constBits()[:bpl * height])
         return Image.frombytes("RGB", (width, height), data, "raw", "RGB", bpl, 1).copy()
+
+    def pil_looks_blank(self, pil) -> bool:
+        try:
+            probe = pil.resize((32, 32), Image.Resampling.BILINEAR)
+            extrema = probe.getextrema()
+            ranges = [hi - lo for lo, hi in extrema]
+            lows = [lo for lo, _hi in extrema]
+            highs = [hi for _lo, hi in extrema]
+            nearly_flat = max(ranges) <= 4
+            nearly_white = min(lows) >= 245
+            nearly_black = max(highs) <= 10
+            return bool(nearly_flat and (nearly_white or nearly_black))
+        except Exception:
+            return False
 
     def clear_frame_renderers(self) -> None:
         for w in list(getattr(self, "frame_render_windows", [])):
@@ -2656,7 +3382,7 @@ class PySideMapStitcher(QMainWindow):
             # The output cell is the cropped visible screenshot, not an XYZ 256px tile.
             render_w = int(self.render_w_spin.value())
             render_h = int(self.render_h_spin.value())
-            crop_left = int(self.crop_left_spin.value())
+            crop_left = APPLE_LEFT_BAR_CROP_PX
             crop_top = int(self.crop_top_spin.value())
             crop_right = int(self.crop_right_spin.value())
             crop_bottom = int(self.crop_bottom_spin.value())
@@ -2673,16 +3399,11 @@ class PySideMapStitcher(QMainWindow):
             selected_width_px = max(1.0, sel_right_px - sel_left_px)
             selected_height_px = max(1.0, sel_bottom_px - sel_top_px)
 
-            step_mult_x = float(self.pixel_step_x_spin.value()) if hasattr(self, "pixel_step_x_spin") else 1.0
-            step_mult_y = float(self.pixel_step_y_spin.value()) if hasattr(self, "pixel_step_y_spin") else 1.0
+            step_mult_x = apple_frame_step_multiplier_for_zoom(cfg.z)
+            step_mult_y = apple_frame_step_multiplier_for_zoom(cfg.z)
             shift_x_px = FIXED_FRAME_SHIFT_X_PX
             shift_y_px = FIXED_FRAME_SHIFT_Y_PX
-            # Default: crop-aware Apple/frame center correction.
-            # The checkbox is optional and may not exist in older UI states.
-            crop_correct_url = bool(
-                getattr(self, "crop_correct_url_check", None)
-                and self.crop_correct_url_check.isChecked()
-            )
+            crop_correct_url = True
             effective_step_x_px = max(1.0, float(visible_w) * step_mult_x + shift_x_px)
             effective_step_y_px = max(1.0, float(visible_h) * step_mult_y + shift_y_px)
 
@@ -2733,15 +3454,23 @@ class PySideMapStitcher(QMainWindow):
             # This prevents a mismatch where the captures move by visible+shift
             # but the GeoTIFF was still written as if each cell moved only by
             # visible_w/visible_h pixels.
-            anchor_crop_bounds = center_georef_bounds_from_request_bounds(
-                sample_request0, cfg.z, visible_w, visible_h
-            )
-            grid_west, grid_south, grid_east, grid_north = center_georef_grid_bounds_from_first_request(
-                sample_request0, cfg.z, cols, rows, visible_w, visible_h, effective_step_x_px, effective_step_y_px
+            anchor_crop_bounds = sample_visible0
+            anchor_left_px, anchor_top_px = lonlat_to_world_pixel(anchor_crop_bounds[0], anchor_crop_bounds[3], cfg.z)
+            grid_west, grid_south, grid_east, grid_north = world_pixel_bbox_to_lonlat(
+                anchor_left_px,
+                anchor_top_px,
+                anchor_left_px + cols * float(visible_w),
+                anchor_top_px + rows * float(visible_h),
+                cfg.z,
             )
 
             width = cols * visible_w
             height = rows * visible_h
+            raw_bytes = width * height * 3
+            limit_msg = self.frame_grid_limit_message(cols, rows, width, height, raw_bytes)
+            if limit_msg:
+                raise RuntimeError(limit_msg)
+
             self.frame_cell_w = visible_w
             self.frame_cell_h = visible_h
             self.frame_render_w_actual = render_w
@@ -2791,14 +3520,23 @@ class PySideMapStitcher(QMainWindow):
             self.progress.setValue(0)
             self.clear_frame_renderers()
 
-            count = max(1, min(16, int(self.frame_views_spin.value())))
-            hidden = False
+            requested_count = max(1, min(16, int(self.frame_views_spin.value())))
+            use_hidden_chromium = bool(getattr(self, "hidden_render_check", None) and self.hidden_render_check.isChecked())
+            chromium_browser = find_chromium_executable() if use_hidden_chromium else None
+            hidden = bool(use_hidden_chromium and chromium_browser)
+            if use_hidden_chromium and not chromium_browser:
+                self.log_msg("Use hidden Chromium is checked, but no Chrome/Edge/Chromium executable was found. Falling back to Qt WebViews.")
+            count = requested_count
             self.log_msg("=== Frame Screenshot Grid mode ===")
-            self.log_msg("Apple CENTER georeferencing active: GeoTIFF uses the Apple frame URL center and the effective center step incl. FrameShift.")
-            self.log_msg("Manual alignment mode: effective step = visible pixels * Pixel step multiplier + Frame shift px/cell.")
-            self.log_msg("Crop-aware alignment mode active: Apple URL center/span includes crop L/T/R/B, with the same center-shift logic on all sides.")
-            if crop_correct_url:
-                self.log_msg("Crop URL correction is ON: requested URL span includes crop margins and symmetric center shifts for left/right/top/bottom.")
+            self.log_msg(
+                "Logical crop-center alignment active: output cell size defines the grid; "
+                "Apple URL center is derived from the cropped screenshot center."
+            )
+            self.log_msg(
+                f"Apple effective zoom cap: z{APPLE_FRAME_MAX_EFFECTIVE_ZOOM}; requested z={cfg.z}; "
+                f"step multiplier X/Y={step_mult_x:.4f}/{step_mult_y:.4f}. "
+                "This makes z20 advance two visible cells because the frame content moved only half a cell."
+            )
             if hasattr(self, "frame_preview_cells_spin"):
                 self.log_msg(f"Apple/Frame Mark Area view fallback: {float(self.frame_preview_cells_spin.value()):.1f} renderer-cells. This prevents the old one-tile fallback.")
             self.log_msg("Tip: X/Y shift negative = screenshots closer/more overlap; positive = farther apart. PyPI stitching is off by default.")
@@ -2814,7 +3552,7 @@ class PySideMapStitcher(QMainWindow):
             self.log_msg(f"Visible output cell: {visible_w}x{visible_h} px")
             self.log_msg(f"Request span full screenshot: lon={request_lon_span:.12f}, lat={request_lat_span:.12f}")
             self.log_msg(f"Degrees per px: lon={lon_per_px:.14f}, lat={lat_per_px:.14f}")
-            self.log_msg(f"Step per screenshot: X={effective_step_x_px:.1f}px, Y={effective_step_y_px:.1f}px; visible cell={visible_w}x{visible_h}px; multiplier={step_mult_x:.3f}/{step_mult_y:.3f}; shift={shift_x_px:.1f}/{shift_y_px:.1f}px; lon≈{visible_lon_span:.12f}, lat≈{visible_lat_span:.12f}")
+            self.log_msg(f"Step per screenshot: X={effective_step_x_px:.1f}px, Y={effective_step_y_px:.1f}px; visible cell={visible_w}x{visible_h}px; center correction from crop L/T/R/B={crop_left}/{crop_top}/{crop_right}/{crop_bottom}")
             self.log_msg(f"Grid: {cols} x {rows} = {self.frame_total:,}; output pixels: {width:,} x {height:,}")
             self.log_msg(f"Render WebViews: {count}; hidden={hidden}")
             self.log_msg(f"Individual TIFF tiles: {self.frame_tile_dir}")
@@ -2835,6 +3573,13 @@ class PySideMapStitcher(QMainWindow):
                     )
                     self.log_msg(f"Sample cell col={sample_col} row={sample_row} visible={sample_visible} request={sample_request}")
                     self.log_msg(f"Sample URL col={sample_col} row={sample_row}: {sample_url}")
+
+            if hidden and chromium_browser:
+                self.frame_chromium_browser = chromium_browser
+                self.log_msg(f"Hidden Chromium renderer active: {chromium_browser}")
+                self.frame_chromium_thread = threading.Thread(target=self._run_hidden_chromium_frame_jobs, daemon=True)
+                self.frame_chromium_thread.start()
+                return
 
             fullscreen = True if not getattr(self, "fullscreen_render_check", None) else bool(self.fullscreen_render_check.isChecked())
             self.log_msg(f"Exact renderer windows: {fullscreen}; not maximized; capture size forced to Render W/H.")
@@ -2870,6 +3615,122 @@ class PySideMapStitcher(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Frame screenshot error", str(exc))
             self.log_msg(f"Frame screenshot error: {exc}")
+
+    def _run_hidden_chromium_frame_jobs(self) -> None:
+        stopped = False
+        profile_dir = Path(tempfile.mkdtemp(prefix="pymap_hidden_chromium_profile_"))
+        png_dir = Path(tempfile.mkdtemp(prefix="pymap_hidden_chromium_png_"))
+        try:
+            import numpy as np
+            browser = str(getattr(self, "frame_chromium_browser", "") or "")
+            if not browser:
+                raise RuntimeError("Hidden Chromium was requested, but no browser executable is configured.")
+            total = len(list(getattr(self, "frame_queue", [])))
+            for index, job in enumerate(list(getattr(self, "frame_queue", [])), start=1):
+                if self.stop_event.is_set():
+                    stopped = True
+                    break
+                try:
+                    url, visible_bounds, request_bounds = expand_frame_url_grid(
+                        self.frame_cfg.url_template,
+                        job.col, job.row, job.z,
+                        self.frame_selected_west, self.frame_selected_north,
+                        self.frame_request_lon_span, self.frame_request_lat_span,
+                        self.frame_lon_per_px, self.frame_lat_per_px,
+                        self.frame_cell_w, self.frame_cell_h,
+                        int(self.frame_render_w_actual), int(self.frame_render_h_actual),
+                        int(getattr(self, "frame_crop_left", APPLE_LEFT_BAR_CROP_PX)),
+                        int(getattr(self, "frame_crop_top", 0)),
+                        int(getattr(self, "frame_crop_right", 0)),
+                        int(getattr(self, "frame_crop_bottom", 0)),
+                        float(getattr(self, "frame_step_mult_x", 1.0)),
+                        float(getattr(self, "frame_step_mult_y", 1.0)),
+                        float(getattr(self, "frame_shift_x_px", 0.0)),
+                        float(getattr(self, "frame_shift_y_px", 0.0)),
+                        bool(getattr(self, "frame_crop_correct_url", False)),
+                    )
+                    actual_cropped_bounds = visible_bounds
+                    wait_ms = max(
+                        1500,
+                        int(getattr(self, "frame_wait_ms", 1000)) + int(getattr(self, "frame_extra_wait_ms", 2500)),
+                    )
+                    png_path = png_dir / f"grid_z{job.z}_col{job.col}_row{job.row}.png"
+                    pil = None
+                    for attempt in range(1, 6):
+                        run_hidden_chromium_screenshot(
+                            browser,
+                            url,
+                            png_path,
+                            int(self.frame_render_w_actual),
+                            int(self.frame_render_h_actual),
+                            wait_ms + ((attempt - 1) * 1000),
+                            profile_dir,
+                        )
+                        candidate = Image.open(png_path).convert("RGB")
+                        if not self.pil_looks_blank(candidate) or attempt == 5:
+                            pil = candidate
+                            break
+                        self.q.put(("log", f"Hidden Chromium captured a blank cell at col={job.col} row={job.row}; retry {attempt}/5."))
+                    if pil is None:
+                        raise RuntimeError("Hidden Chromium did not return an image.")
+
+                    l = int(getattr(self, "frame_crop_left", APPLE_LEFT_BAR_CROP_PX))
+                    t = int(getattr(self, "frame_crop_top", 0))
+                    r = pil.width - int(getattr(self, "frame_crop_right", 0))
+                    b = pil.height - int(getattr(self, "frame_crop_bottom", 0))
+                    if r <= l or b <= t:
+                        raise RuntimeError("Crop values remove the full hidden Chromium image.")
+                    pil = pil.crop((l, t, r, b))
+                    if pil.width != self.frame_cell_w or pil.height != self.frame_cell_h:
+                        pil = pil.resize((self.frame_cell_w, self.frame_cell_h), Image.Resampling.LANCZOS)
+
+                    tile_path = self.frame_tile_dir / f"grid_z{job.z}_col{job.col}_row{job.row}.tif"
+                    tile_path.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = tile_path.with_suffix(".tmp.tif")
+                    pil.save(tmp, format="TIFF", compression="tiff_deflate")
+                    os.replace(tmp, tile_path)
+                    write_worldfile_and_prj(
+                        tile_path, self.frame_cell_w, self.frame_cell_h,
+                        lonlat_bbox_to_webmercator_bounds(
+                            actual_cropped_bounds[0],
+                            actual_cropped_bounds[1],
+                            actual_cropped_bounds[2],
+                            actual_cropped_bounds[3],
+                        )
+                    )
+
+                    arr = np.asarray(pil, dtype=np.uint8)
+                    r0 = job.row * self.frame_cell_h
+                    c0 = job.col * self.frame_cell_w
+                    self.frame_mem[r0:r0+self.frame_cell_h, c0:c0+self.frame_cell_w, :] = arr
+                    self.frame_done = index
+                    self.q.put(("progress", index, total, "Hidden Chromium"))
+                    if index == 1:
+                        self.q.put(("log", f"First hidden Chromium URL: {url}"))
+                    if index % 5 == 0:
+                        try:
+                            self.frame_mem.flush()
+                        except Exception:
+                            pass
+                        self.q.put(("log", f"Hidden Chromium progress: {index:,}/{total:,}"))
+                except Exception as exc:
+                    self.frame_done = index
+                    self.q.put(("progress", index, total, "Hidden Chromium"))
+                    self.q.put(("log", f"Hidden Chromium capture error at col={job.col} row={job.row}: {exc}"))
+            try:
+                if self.frame_mem is not None:
+                    self.frame_mem.flush()
+            except Exception:
+                pass
+        except Exception as exc:
+            self.q.put(("log", f"Hidden Chromium renderer failed: {exc}"))
+        finally:
+            try:
+                shutil.rmtree(profile_dir, ignore_errors=True)
+                shutil.rmtree(png_dir, ignore_errors=True)
+            except Exception:
+                pass
+            self.q.put(("frame_done", stopped))
 
     def _start_frame_dispatch(self) -> None:
         """Start all frame renderer queues after WebEngine windows had time to appear."""
@@ -2916,7 +3777,7 @@ class PySideMapStitcher(QMainWindow):
             self.frame_lon_per_px, self.frame_lat_per_px,
             self.frame_cell_w, self.frame_cell_h,
             int(self.frame_render_w_actual), int(self.frame_render_h_actual),
-            int(self.crop_left_spin.value()),
+            APPLE_LEFT_BAR_CROP_PX,
             int(self.crop_top_spin.value()),
             int(self.crop_right_spin.value()),
             int(self.crop_bottom_spin.value()),
@@ -2926,13 +3787,15 @@ class PySideMapStitcher(QMainWindow):
             float(getattr(self, "frame_shift_y_px", 0.0)),
             bool(getattr(self, "frame_crop_correct_url", False)),
         )
-        actual_cropped_bounds = center_georef_bounds_from_request_bounds(
-            request_bounds, job.z, self.frame_cell_w, self.frame_cell_h
-        )
+        actual_cropped_bounds = visible_bounds
         item["url"] = url
+        item["expected_url"] = QUrl(url).toString()
         item["visible_bounds"] = actual_cropped_bounds
         item["synthetic_visible_bounds"] = visible_bounds
         item["request_bounds"] = request_bounds
+        item["load_event_seen"] = False
+        item["iframe_waits"] = 0
+        item["blank_retries"] = 0
 
         if self.frame_done == 0:
             self.log_msg(f"First frame render URL: {url}")
@@ -2948,28 +3811,25 @@ class PySideMapStitcher(QMainWindow):
         except Exception:
             pass
         try:
-            view.setHtml("<html><body style='margin:0;background:#000'></body></html>", QUrl("about:blank"))
-            QApplication.processEvents()
-        except Exception:
-            pass
-        try:
             view.loadFinished.disconnect()
         except Exception:
             pass
         view.loadFinished.connect(lambda ok, it=item, key=(job.z, job.col, job.row): self.frame_loaded(ok, it, key))
         view.load(QUrl(url))
+        load_timeout_ms = max(12000, int(self.rate_spin.value()) + int(self.frame_settle_extra_spin.value()) + 8000)
+        QTimer.singleShot(load_timeout_ms, lambda it=item, key=(job.z, job.col, job.row): self.frame_load_timeout(it, key))
 
     def frame_loaded(self, ok: bool, item, key=None) -> None:
+        # Ignore stale loadFinished events from the previous URL/page.
+        if key is not None and item.get("job_key") != key:
+            self.log_msg(f"Ignored stale loadFinished for renderer {item.get('index')}: {key} != {item.get('job_key')}")
+            return
         try:
             item["view"].loadFinished.disconnect()
         except Exception:
             pass
 
-        # Ignore stale loadFinished events from the previous URL/page.
-        if key is not None and item.get("job_key") != key:
-            self.log_msg(f"Ignored stale loadFinished for renderer {item.get('index')}: {key} != {item.get('job_key')}")
-            return
-
+        item["load_event_seen"] = True
         item["loaded_ok"] = bool(ok)
         if not ok:
             job = item.get("job")
@@ -2979,7 +3839,45 @@ class PySideMapStitcher(QMainWindow):
         wait_ms = max(1000, int(self.rate_spin.value()))
         QTimer.singleShot(wait_ms, lambda it=item, k=key: self.frame_extra_settle_wait(it, k))
 
+    def frame_load_timeout(self, item, key=None) -> None:
+        if not self.frame_active:
+            return
+        if key is not None and item.get("job_key") != key:
+            return
+        if bool(item.get("load_event_seen")):
+            return
+        job = item.get("job")
+        self.log_msg(
+            f"Renderer {item.get('index')} load timeout; continuing after settle for col={job.col if job else '?'} row={job.row if job else '?'}."
+        )
+        item["load_event_seen"] = True
+        self.frame_extra_settle_wait(item, key)
+
     def frame_extra_settle_wait(self, item, key=None) -> None:
+        if not self.frame_active:
+            return
+        if key is not None and item.get("job_key") != key:
+            return
+        view = item["view"]
+        try:
+            def _after_iframe_check(loaded):
+                if not self.frame_active:
+                    return
+                if key is not None and item.get("job_key") != key:
+                    return
+                if str(loaded) != "1" and int(item.get("iframe_waits", 0)) < 8:
+                    item["iframe_waits"] = int(item.get("iframe_waits", 0)) + 1
+                    QTimer.singleShot(1000, lambda it=item, k=key: self.frame_extra_settle_wait(it, k))
+                    return
+                self.frame_after_iframe_ready(item, key)
+            view.page().runJavaScript("(!document.body || !document.body.dataset || document.body.dataset.frameLoaded === undefined) ? '1' : (document.body.dataset.frameLoaded || '0');", _after_iframe_check)
+            return
+        except Exception:
+            pass
+
+        self.frame_after_iframe_ready(item, key)
+
+    def frame_after_iframe_ready(self, item, key=None) -> None:
         if not self.frame_active:
             return
         if key is not None and item.get("job_key") != key:
@@ -2990,6 +3888,9 @@ class PySideMapStitcher(QMainWindow):
             # the previous map location in Qt WebEngine.
             win = view.window()
             if win:
+                win.show()
+                win.raise_()
+                win.activateWindow()
                 view.resize(win.size())
             view.update()
             view.repaint()
@@ -3011,6 +3912,11 @@ class PySideMapStitcher(QMainWindow):
             view = item["view"]
             try:
                 view.resize(int(self.frame_render_w_actual), int(self.frame_render_h_actual))
+                win = view.window()
+                if win:
+                    win.show()
+                    win.raise_()
+                    win.activateWindow()
                 view.repaint()
                 QApplication.processEvents()
             except Exception:
@@ -3019,7 +3925,7 @@ class PySideMapStitcher(QMainWindow):
             pix = view.grab()
             pil = self.qimage_to_pil_rgb(pix.toImage())
 
-            l = int(self.crop_left_spin.value())
+            l = APPLE_LEFT_BAR_CROP_PX
             t = int(self.crop_top_spin.value())
             r = pil.width - int(self.crop_right_spin.value())
             b = pil.height - int(self.crop_bottom_spin.value())
@@ -3031,6 +3937,20 @@ class PySideMapStitcher(QMainWindow):
             # This avoids mismatches if the OS maximized window differs by borders/taskbar.
             if pil.width != self.frame_cell_w or pil.height != self.frame_cell_h:
                 pil = pil.resize((self.frame_cell_w, self.frame_cell_h), Image.Resampling.LANCZOS)
+
+            if self.pil_looks_blank(pil) and int(item.get("blank_retries", 0)) < 5:
+                item["blank_retries"] = int(item.get("blank_retries", 0)) + 1
+                self.log_msg(
+                    f"Renderer {item.get('index')} captured a blank cell at col={job.col} row={job.row}; retry {item['blank_retries']}/5."
+                )
+                try:
+                    view.update()
+                    view.repaint()
+                    QApplication.processEvents()
+                except Exception:
+                    pass
+                QTimer.singleShot(1500, lambda it=item, k=key: self.capture_frame_tile(it, k))
+                return
 
             tile_path = self.frame_tile_dir / f"grid_z{job.z}_col{job.col}_row{job.row}.tif"
             tile_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3150,6 +4070,8 @@ class PySideMapStitcher(QMainWindow):
                     self.status_label.setText(f"{phase}: {done:,}/{total:,}")
                 elif item[0] == "status":
                     self.status_label.setText(item[1])
+                elif item[0] == "frame_done":
+                    self.finish_frame_screenshot_job(stopped=bool(item[1]))
         except queue.Empty:
             pass
 
@@ -3161,7 +4083,16 @@ def main() -> int:
         print("Import error:", _PYSIDE_IMPORT_ERROR)
         return 1
     os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--ignore-gpu-blocklist")
+    set_windows_app_user_model_id()
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    try:
+        app.setApplicationDisplayName(APP_DISPLAY_TITLE)
+    except Exception:
+        pass
+    icon = load_app_icon()
+    if icon is not None:
+        app.setWindowIcon(icon)
     win = PySideMapStitcher()
     win.show()
     return app.exec()
