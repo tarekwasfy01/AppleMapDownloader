@@ -2,7 +2,7 @@
 
 AppleMapDownloader is a lightweight desktop application for downloading and stitching large map areas into high-resolution raster outputs. It supports multi-threaded downloading, automatic image stitching, GeoTIFF export, BigTIFF support, and georeferenced outputs suitable for GIS workflows.
 The project was developed as a companion utility for PyMapStitcher, allowing users to generate large map mosaics and geospatial imagery for research, GIS, remote sensing, archaeology, and mapping projects.
-
+You can asl ouse the API: https://apify.com/t_wasfy/apple-maps-scraper#frame-map-downloader-apify-actor-coordinates-only
 Features
 Multi-threaded map downloading
 Large area stitching
