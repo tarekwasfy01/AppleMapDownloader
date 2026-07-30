@@ -17,6 +17,9 @@ Suitable for very large raster generation workflows
 # Download
 https://github.com/tarekwasfy01/AppleMapDownloader/releases/download/AppleMapDownloaderv2.0/AppleMapDownloader.exe
 
+<a href="https://get.microsoft.com/installer/download/9p9bz7780s7g?referrer=appbadge" target="_self" >
+	<img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200"/>
+</a>
 
 Download the Linux installer:
 
