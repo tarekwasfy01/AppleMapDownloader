@@ -1,5 +1,11 @@
 # AppleMapDownloader
+<p> <a href="https://www.semantic-programming-language.com/module.html?name=AppleMapDownloader&url=https%3A%2F%2Fgithub.com%2FSemanticProgrammingLanguage%2FSemantic-Module-Store%2Freleases%2Fdownload%2FAppleMapDownloader-20260917-063930%2FAppleMapDownloader-20260917-063930.zip&official=1&source=archive"><img alt="AppleMapDownloader — Semantic AppleMapDownloader-20260917-063930" src="https://img.shields.io/endpoint?url=https://www.semantic-programming-language.com/assets/badges/semantic-badge.json" /></a>
 
+<img alt="PyPI Version" src="https://img.shields.io/pypi/v/applemapdownloader">
+<img alt="Conda Version" src="https://img.shields.io/conda/v/mustatil/applemapdownloader">
+
+
+</p>
 AppleMapDownloader is a lightweight desktop application for downloading and stitching large map areas into high-resolution raster outputs. It supports multi-threaded downloading, automatic image stitching, GeoTIFF export, BigTIFF support, and georeferenced outputs suitable for GIS workflows.
 The project was developed as a companion utility for PyMapStitcher, allowing users to generate large map mosaics and geospatial imagery for research, GIS, remote sensing, archaeology, and mapping projects.
 
